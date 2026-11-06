@@ -319,6 +319,13 @@ int rsa_pss_sign(
 
 
 // RSA-PSS로 검증
+int rsa_pss_verify(
+    EVP_PKEY* public_key,
+    const unsigned char* message, size_t message_len,
+    const unsigned char* signature, size_t signature_len
+) {
+    
+}
 
 
 // RSA-PSS 동작 확인용 (RSA-OAEP에서 키쌍 제외 코드만 수정해서)
