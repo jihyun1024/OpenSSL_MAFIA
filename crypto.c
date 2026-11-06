@@ -148,12 +148,9 @@ int aead_decrypt(
 ) {
     EVP_CIPHER* cipher = NULL;
     EVP_CIPHER_CTX* ctx = NULL;
-    unsigned char final_buf[EVP_MAX_BLOCK_LENGTH];
-    unsigned char tag_copy[AEAD_TAG_BYTE];
-    int len = 0;
-    int final_len = 0;
+    unsigned char final_buf[EVP_MAX_BLOCK_LENGTH], tag_copy[AEAD_TAG_BYTE];
+    int len = 0, final_len = 0, success = 0;
     size_t produced = 0;
-    int success = 0;
 
     if (plaintext_len == NULL) return 0;
     *plaintext_len = 0;
@@ -171,23 +168,19 @@ int aead_decrypt(
         goto done;
 
     ctx = EVP_CIPHER_CTX_new();
-    if (EVP_DecryptInit_ex(ctx, cipher, NULL, key, nonce) != 1)
-        goto done;
 
-    if (EVP_DecryptUpdate(ctx, NULL, &len, aad, (int)aad_len) != 1)
-        goto done;
-
-    if (EVP_DecryptUpdate(ctx, plaintext, &len, ciphertext, (int)ciphertext_len) != 1 ||
+    if (EVP_DecryptInit_ex(ctx, cipher, NULL, key, nonce) != 1 ||
+        EVP_DecryptUpdate(ctx, NULL, &len, aad, (int)aad_len) != 1 ||
+        EVP_DecryptUpdate(ctx, plaintext, &len, ciphertext, (int)ciphertext_len) != 1 ||
         len < 0 || (size_t)len > ciphertext_len)
         goto done;
 
     produced = (size_t)len;
 
     memcpy(tag_copy, tag, sizeof tag_copy);
-    if (EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_TAG, AEAD_TAG_BYTE, tag_copy) != 1)
-        goto done;
 
-    if (EVP_DecryptFinal_ex(ctx, final_buf, &final_len) != 1 ||
+    if (EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_TAG, AEAD_TAG_BYTE, tag_copy) != 1 ||
+        EVP_DecryptFinal_ex(ctx, final_buf, &final_len) != 1 ||
         final_len < 0 || (size_t)final_len > ciphertext_len - produced)
         goto done;
 
@@ -261,8 +254,7 @@ int rsa_oaep_decrypt(
 ) {
     EVP_PKEY_CTX* ctx = NULL;
     unsigned char* decrypted = NULL;
-    size_t capacity;
-    size_t output_len;
+    size_t capacity, output_len;
     int max_output_len;
     int success = 0;
 
@@ -314,7 +306,24 @@ int rsa_pss_sign(
     const unsigned char* message, size_t message_len,
     unsigned char* signature, size_t signature_len
 ) {
+    EVP_MD_CTX* ctx = NULL;
+    EVP_PKEY_CTX* pctx = NULL;
+    int success = 0;
 
+    ctx = EVP_MD_CTX_new();
+    if (!ctx || EVP_DigestSignInit(ctx, &pctx, EVP_sha256(), NULL, private_key) <= 0 ||
+        EVP_PKEY_CTX_set_rsa_padding(pctx, RSA_PKCS1_PSS_PADDING) <= 0 ||
+        EVP_PKEY_CTX_set_rsa_mgf1_md(pctx, EVP_sha256()) <= 0 ||
+        EVP_PKEY_CTX_set_rsa_pss_saltlen(pctx, RSA_PSS_SALTLEN_DIGEST) <= 0 ||
+        EVP_DigestSignUpdate(ctx, message, message_len) <= 0 ||
+        EVP_DigestSignFinal(ctx, signature, &signature_len) <= 0) goto done;
+
+    success = 1;
+
+done:
+    if (success != 1) ERR_print_errors_fp(stderr);
+    EVP_MD_CTX_free(ctx);
+    return success;
 }
 
 
@@ -324,17 +333,34 @@ int rsa_pss_verify(
     const unsigned char* message, size_t message_len,
     const unsigned char* signature, size_t signature_len
 ) {
-    
+    EVP_MD_CTX* ctx = NULL;
+    EVP_PKEY_CTX* pctx = NULL;
+    int success = 0;
+
+    ctx = EVP_MD_CTX_new();
+    if (!ctx || EVP_DigestVerifyInit(ctx, &pctx, EVP_sha256(), NULL, public_key) <= 0 ||
+        EVP_PKEY_CTX_set_rsa_padding(pctx, RSA_PKCS1_PSS_PADDING) <= 0 ||
+        EVP_PKEY_CTX_set_rsa_mgf1_md(pctx, EVP_sha256()) <= 0 ||
+        EVP_PKEY_CTX_set_rsa_pss_saltlen(pctx, RSA_PSS_SALTLEN_DIGEST) <= 0 ||
+        EVP_DigestVerifyUpdate(ctx, message, message_len) <= 0 ||
+        EVP_DigestVerifyFinal(ctx, signature, signature_len) <= 0) goto done;
+
+    success = 1;
+
+done:
+    if (success != 1) ERR_print_errors_fp(stderr);
+    EVP_MD_CTX_free(ctx);
+    return success;
 }
 
-
-// RSA-PSS 동작 확인용 (RSA-OAEP에서 키쌍 제외 코드만 수정해서)
+// RSA-PSS 동작 확인용 
 int main() {
     EVP_PKEY_CTX* keyctx = NULL;
     EVP_PKEY* key = NULL;
     unsigned char session_key[PBKDF2_KEY_BYTE] = {0};
     unsigned char ciphertext[RSA_MODULUS_BYTE] = {0};
     unsigned char pt[PBKDF2_KEY_BYTE] = {0};
+    unsigned char signature[RSA_MODULUS_BYTE] = {0};
     size_t ct_len = sizeof ciphertext;
     size_t pt_len = sizeof pt;
     int result = 1;
@@ -374,6 +400,20 @@ int main() {
 
     printf("RSA-OAEP DECRYPTION SUCCESS!!!\n");
     printf("\nDECRYPTED: "); hexprint(pt, pt_len);
+
+    if (rsa_pss_sign(key, session_key, sizeof session_key,
+                     signature, sizeof signature) != 1) {
+        fprintf(stderr, "RSA-PSS signing Failed\n");
+        goto done;
+    }
+    if (rsa_pss_verify(key, session_key, sizeof session_key,
+                       signature, sizeof signature) != 1) {
+        fprintf(stderr, "RSA-PSS verification Failed\n");
+        goto done;
+    }
+    printf("\nRSA-PSS SIGN/VERIFY SUCCESS!!!\n");
+    printf("\nSIGNATURE: \n"); hexprint(signature, RSA_MODULUS_BYTE); 
+    printf("\n");hexprint(signature, sizeof signature);
     result = 0;
 
 done:
