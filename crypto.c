@@ -1,16 +1,8 @@
-#include <string.h>
-#include <stdio.h>
-#include <limits.h>
-
-#include <openssl/evp.h>
-#include <openssl/rand.h>
-#include <openssl/crypto.h>
-#include <openssl/kdf.h>
-#include <openssl/core_names.h>
-#include <openssl/err.h>
-#include <openssl/rsa.h>
-
 #include "crypto.h"
+
+#include <string.h>
+#include <limits.h>
+#include <stddef.h>
 
 
 // 디버깅용 16진수 프린트 함수
@@ -351,73 +343,4 @@ done:
     if (success != 1) ERR_print_errors_fp(stderr);
     EVP_MD_CTX_free(ctx);
     return success;
-}
-
-// RSA-PSS 동작 확인용 
-int main() {
-    EVP_PKEY_CTX* keyctx = NULL;
-    EVP_PKEY* key = NULL;
-    unsigned char session_key[PBKDF2_KEY_BYTE] = {0};
-    unsigned char ciphertext[RSA_MODULUS_BYTE] = {0};
-    unsigned char pt[PBKDF2_KEY_BYTE] = {0};
-    unsigned char signature[RSA_MODULUS_BYTE] = {0};
-    size_t ct_len = sizeof ciphertext;
-    size_t pt_len = sizeof pt;
-    int result = 1;
-
-    if (RAND_bytes(session_key, PBKDF2_KEY_BYTE) != 1) {
-        fprintf(stderr, "Session Key generation Failed");
-        goto done;
-    }
-
-    // 공개키-개인키 쌍 생성 (RSA-OAEP 코드에는 없기 때문)
-    keyctx = EVP_PKEY_CTX_new_from_name(NULL, "RSA", NULL);
-    if (!keyctx || EVP_PKEY_keygen_init(keyctx) <= 0 ||
-        EVP_PKEY_CTX_set_rsa_keygen_bits(keyctx, RSA_KEY_BIT) <= 0 || 
-        EVP_PKEY_keygen(keyctx, &key) <= 0) {
-        fprintf(stderr, "RSA 3072-bit key pair has not generated");
-        goto done;
-    }
-
-    if (rsa_oaep_encrypt(key, session_key, PBKDF2_KEY_BYTE, ciphertext, &ct_len) != 1) {
-        fprintf(stderr, "RSA-OAEP encryption Failed");
-        goto done;
-    }
-
-    printf("RSA-OAEP ENCRYPTION SUCCESS!!!!\n");
-    printf("\nCIPHERTEXT: "); hexprint(ciphertext, ct_len);
-    printf("\nORIGINAL: "); hexprint(session_key, PBKDF2_KEY_BYTE);
-
-    if (rsa_oaep_decrypt(key, ciphertext, ct_len, pt, &pt_len) != 1) {
-        fprintf(stderr, "RSA-OAEP decryption Failed");
-        goto done;
-    }
-    if (pt_len != sizeof session_key ||
-        CRYPTO_memcmp(pt, session_key, sizeof session_key) != 0) {
-        fprintf(stderr, "RSA-OAEP plaintext does not match\n");
-        goto done;
-    }
-
-    printf("RSA-OAEP DECRYPTION SUCCESS!!!\n");
-    printf("\nDECRYPTED: "); hexprint(pt, pt_len);
-
-    if (rsa_pss_sign(key, session_key, sizeof session_key,
-                     signature, sizeof signature) != 1) {
-        fprintf(stderr, "RSA-PSS signing Failed\n");
-        goto done;
-    }
-    if (rsa_pss_verify(key, session_key, sizeof session_key,
-                       signature, sizeof signature) != 1) {
-        fprintf(stderr, "RSA-PSS verification Failed\n");
-        goto done;
-    }
-    printf("\nRSA-PSS SIGN/VERIFY SUCCESS!!!\n");
-    printf("\nSIGNATURE: \n"); hexprint(signature, RSA_MODULUS_BYTE); 
-    printf("\n");hexprint(signature, sizeof signature);
-    result = 0;
-
-done:
-    EVP_PKEY_free(key);
-    EVP_PKEY_CTX_free(keyctx);
-    return result;
 }

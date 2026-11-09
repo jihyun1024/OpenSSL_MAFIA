@@ -2,8 +2,13 @@
 #ifndef CRYPTO_H
 #define CRYPTO_H
 
-#include <stddef.h>
 #include <openssl/evp.h>
+#include <openssl/rand.h>
+#include <openssl/crypto.h>
+#include <openssl/kdf.h>
+#include <openssl/core_names.h>
+#include <openssl/err.h>
+#include <openssl/rsa.h>
 
 #define PBKDF2_SALT_BYTE    16
 #define PBKDF2_KEY_BYTE     32
