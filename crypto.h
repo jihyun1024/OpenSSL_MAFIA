@@ -22,32 +22,36 @@
 #define RSA_MODULUS_BYTE    384
 #define RSA_PSS_SALT_BYTE   32
 
+#define GAME_ID_BYTE        16
+#define COMMIT_NONCE_BYTE   32
+#define SHA256_BYTE         32
+
 
 static void hexprint(const unsigned char* p, size_t n);
 
 // 함수 선언부
+int commit_hash(
+    const unsigned char game_id[GAME_ID_BYTE], unsigned char liar_id, 
+    const unsigned char nonce[COMMIT_NONCE_BYTE], unsigned char out[SHA256_BYTE]
+);
+
+int rand_bytes(unsigned char* buf, size_t n);
+
 int pbkdf2_derive_key(
     const unsigned char* password, size_t password_len, 
-    const unsigned char salt[PBKDF2_SALT_BYTE],
-    unsigned char key_out[PBKDF2_KEY_BYTE]
+    const unsigned char salt[PBKDF2_SALT_BYTE], unsigned char key_out[PBKDF2_KEY_BYTE]
 );
 
 int aead_encrypt(
-    const unsigned char key[AEAD_KEY_BYTE],
-    const unsigned char nonce[AEAD_NONCE_BYTE],
-    const unsigned char* aad, size_t aad_len,
-    const unsigned char* plaintext, size_t plaintext_len,
-    unsigned char* ciphertext, size_t* ciphertext_len,
-    unsigned char tag_out[AEAD_TAG_BYTE]
+    const unsigned char key[AEAD_KEY_BYTE], const unsigned char nonce[AEAD_NONCE_BYTE],
+    const unsigned char* aad, size_t aad_len, const unsigned char* plaintext, size_t plaintext_len,
+    unsigned char* ciphertext, size_t* ciphertext_len, unsigned char tag_out[AEAD_TAG_BYTE]
 );
 
 int aead_decrypt(
-    const unsigned char key[AEAD_KEY_BYTE],
-    const unsigned char nonce[AEAD_NONCE_BYTE],
-    const unsigned char* aad, size_t aad_len,
-    const unsigned char* ciphertext, size_t ciphertext_len,
-    unsigned char* plaintext, size_t* plaintext_len,
-    const unsigned char tag[AEAD_TAG_BYTE]
+    const unsigned char key[AEAD_KEY_BYTE], const unsigned char nonce[AEAD_NONCE_BYTE],
+    const unsigned char* aad, size_t aad_len, const unsigned char* ciphertext, size_t ciphertext_len, 
+    unsigned char* plaintext, size_t* plaintext_len, const unsigned char tag[AEAD_TAG_BYTE]
 );
 
 int rsa_oaep_encrypt(

@@ -11,6 +11,51 @@ static void hexprint(const unsigned char* p, size_t n) {
     printf("\n");
 }
 
+
+// SHA256으로 label || game_id || liar_id || nonce 해시
+// Label: 고유 문자열
+// game_id: 게임 고유의 ID -> 난수로 16바이트 생성
+// liar_id: 해당 게임에서 라이어로 지정된 플레이어의 ID(1바이트 번호)
+int commit_hash(
+    const unsigned char game_id[GAME_ID_BYTE], unsigned char liar_id, 
+    const unsigned char nonce[COMMIT_NONCE_BYTE], unsigned char out[SHA256_BYTE]
+) {
+    static const char LABEL[] = "LIAR_COMMIT";
+    const size_t label_len = sizeof LABEL - 1;
+    unsigned int out_len = 0;
+    int success = 0;
+
+    EVP_MD_CTX* ctx = NULL;
+
+    if (game_id == NULL || nonce == NULL || out == NULL) {
+        goto done;
+    }
+
+    ctx = EVP_MD_CTX_new();
+    if (ctx == NULL || 
+        EVP_DigestInit_ex(ctx, EVP_sha256(), NULL) != 1 ||
+        EVP_DigestUpdate(ctx, LABEL, label_len) != 1 || 
+        EVP_DigestUpdate(ctx, game_id, GAME_ID_BYTE) != 1 || 
+        EVP_DigestUpdate(ctx, &liar_id, 1) != 1 || 
+        EVP_DigestUpdate(ctx, nonce, COMMIT_NONCE_BYTE) != 1 || 
+        EVP_DigestFinal_ex(ctx, out, &out_len) != 1 || out_len != SHA256_BYTE)
+        goto done;
+
+    success = 1;
+
+done:
+    if (ctx) EVP_MD_CTX_free(ctx);
+    return success;
+}
+
+
+// OpenSSL의 RAND_bytes 함수를 "crypto.h" 헤더 파일 포함만으로 사용할 수 있게 하는 함수
+int rand_bytes(unsigned char* buf, size_t n) {
+    if (buf == NULL) return 0;
+    return RAND_bytes(buf, (int)n) == 1 ? 1 : 0;
+}
+
+
 // PBKDF2로 사용자 패스워드를 키로 변환
 int pbkdf2_derive_key(
     const unsigned char* password, size_t password_len, 
@@ -54,12 +99,9 @@ done:
 
 // AEAD로 암호화 + 인증 (패킷 헤더 정보 || 사용자 식별자 정보를 AAD로)
 int aead_encrypt(
-    const unsigned char key[AEAD_KEY_BYTE],
-    const unsigned char nonce[AEAD_NONCE_BYTE],
-    const unsigned char* aad, size_t aad_len,
-    const unsigned char* plaintext, size_t plaintext_len,
-    unsigned char* ciphertext, size_t* ciphertext_len,
-    unsigned char tag_out[AEAD_TAG_BYTE]
+    const unsigned char key[AEAD_KEY_BYTE], const unsigned char nonce[AEAD_NONCE_BYTE],
+    const unsigned char* aad, size_t aad_len, const unsigned char* plaintext, size_t plaintext_len,
+    unsigned char* ciphertext, size_t* ciphertext_len, unsigned char tag_out[AEAD_TAG_BYTE]
 ) {
     EVP_CIPHER* cipher = NULL;
     EVP_CIPHER_CTX* ctx = NULL;
@@ -131,12 +173,9 @@ done:
 
 // AEAD로 복호화
 int aead_decrypt(
-    const unsigned char key[AEAD_KEY_BYTE],
-    const unsigned char nonce[AEAD_NONCE_BYTE],
-    const unsigned char* aad, size_t aad_len,
-    const unsigned char* ciphertext, size_t ciphertext_len,
-    unsigned char* plaintext, size_t* plaintext_len,
-    const unsigned char tag[AEAD_TAG_BYTE]
+    const unsigned char key[AEAD_KEY_BYTE], const unsigned char nonce[AEAD_NONCE_BYTE],
+    const unsigned char* aad, size_t aad_len, const unsigned char* ciphertext, size_t ciphertext_len,
+    unsigned char* plaintext, size_t* plaintext_len, const unsigned char tag[AEAD_TAG_BYTE]
 ) {
     EVP_CIPHER* cipher = NULL;
     EVP_CIPHER_CTX* ctx = NULL;
