@@ -80,6 +80,8 @@ typedef struct {
     unsigned char server_nonce[NONCE_BYTE];
     unsigned char k_c2s[AEAD_KEY_BYTE];     // Client -> Server 방향 세션키
     unsigned char k_s2c[AEAD_KEY_BYTE];     // Server -> Client 방향 세션키
+
+    // hs_ctx_init 함수 호출 때 초기화 & 외부에서 주는 값 -> 따로 memcpy 할 필요 없음
     EVP_PKEY* self_priv;                    // 자신의 개인키
     EVP_PKEY* peer_pub;                     // 상대방의 공개키
     handshake_state state;                  // 핸드셰이크 단계
@@ -102,15 +104,20 @@ int encode_auth_ok  (const msg_auth_ok* m,   unsigned char* out, size_t* out_len
 int decode_auth_ok  (const unsigned char* in, size_t in_len, msg_auth_ok* m);
 
 // Client측 처리
-int client_hello(handshake_ctx* ctx, msg_hello* out);
+int client_hello(handshake_ctx* ctx, const unsigned char client_id[CLIENT_ID_BYTE], msg_hello* out);
 int client_recv_challenge(handshake_ctx* ctx, const msg_challenge* in);
-int client_auth(handshake_ctx* ctx, msg_auth* out);
+// 성립된 방향별 세션키를 호출자 버퍼(k_c2s / k_s2c)로도 내보낸다.
+// 핸드셰이크 종료 뒤 게임 프로토콜에서 계속 사용하기 위함.
+int client_auth(handshake_ctx* ctx, msg_auth* out,
+                unsigned char k_c2s[AEAD_KEY_BYTE], unsigned char k_s2c[AEAD_KEY_BYTE]);
 int client_recv_auth_ok(handshake_ctx* ctx, const msg_auth_ok* in);
 
 // Server측 처리
 int server_recv_hello(handshake_ctx* ctx, const msg_hello* in);
 int server_challenge(handshake_ctx* ctx, msg_challenge* out);
-int server_recv_auth(handshake_ctx* ctx, const msg_auth* in);
+// 복호화한 방향별 세션키를 호출자 버퍼(k_c2s / k_s2c)로도 내보낸다.
+int server_recv_auth(handshake_ctx* ctx, const msg_auth* in,
+                     unsigned char k_c2s[AEAD_KEY_BYTE], unsigned char k_s2c[AEAD_KEY_BYTE]);
 int server_auth_ok(handshake_ctx* ctx, msg_auth_ok* out);
 
 #endif
