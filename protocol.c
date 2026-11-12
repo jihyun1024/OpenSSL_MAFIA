@@ -195,7 +195,12 @@ int client_hello(handshake_ctx* ctx, const unsigned char client_id[CLIENT_ID_BYT
     success = 1;
 
 done:
-    if (success != 1 && ctx != NULL) ctx->state = HS_FAILED;
+    if (success == 1) {
+        util_log_write(LOG_INFO, "client_hello: HELLO 생성 완료, 핸드셰이크 상태: HS_HELLO_SENT");
+    } else {
+        if (ctx != NULL) ctx->state = HS_FAILED;
+        util_log_write(LOG_ERROR, "client_hello: 실패, 핸드셰이크 상태: HS_FAILED");
+    }
     return success;
 }
 
@@ -223,7 +228,12 @@ int client_recv_challenge(handshake_ctx* ctx, const msg_challenge* in) {
     success = 1;
 
 done:
-    if (success != 1 && ctx != NULL) ctx->state = HS_FAILED;
+    if (success == 1) {
+        util_log_write(LOG_INFO, "client_recv_challenge: 서버 서명 검증 성공, 핸드셰이크 상태: HS_CHALLENGED");
+    } else {
+        if (ctx != NULL) ctx->state = HS_FAILED;
+        util_log_write(LOG_ERROR, "client_recv_challenge: 서버 서명 검증 실패, 핸드셰이크 상태: HS_FAILED");
+    }
     return success;
 }
 
@@ -265,7 +275,12 @@ int client_auth(handshake_ctx* ctx, msg_auth* out,
 
 done:
     OPENSSL_cleanse(keys, sizeof keys);   // 세션키 평문 사본 소거 (성공/실패 공통)
-    if (success != 1 && ctx != NULL) ctx->state = HS_FAILED;
+    if (success == 1) {
+        util_log_write(LOG_INFO, "client_auth: 서명/세션키 교환 완료, 핸드셰이크 상태: HS_AUTHED");
+    } else {
+        if (ctx != NULL) ctx->state = HS_FAILED;
+        util_log_write(LOG_ERROR, "client_auth: 실패, 핸드셰이크 상태: HS_FAILED");
+    }
     return success;
 }
 
@@ -301,7 +316,12 @@ int client_recv_auth_ok(handshake_ctx* ctx, const msg_auth_ok* in) {
 
 done:
     OPENSSL_cleanse(plaintext, sizeof plaintext);
-    if (success != 1 && ctx != NULL) ctx->state = HS_FAILED;
+    if (success == 1) {
+        util_log_write(LOG_INFO, "client_recv_auth_ok: AUTH_OK 복호화/검증 성공, 핸드셰이크 수립(HS_ESTABLISHED)");
+    } else {
+        if (ctx != NULL) ctx->state = HS_FAILED;
+        util_log_write(LOG_ERROR, "client_recv_auth_ok: AUTH_OK 복호화/검증 실패, 핸드셰이크 상태: HS_FAILED");
+    }
     return success;
 }
 
@@ -310,13 +330,17 @@ done:
 // CLIENT_HELLO를 받는 부분
 int server_recv_hello(handshake_ctx* ctx, const msg_hello* in) {
     if (ctx == NULL || in == NULL) return 0;
-    if (ctx->state != HS_INIT || in->ver != PROTOCOL_VERSION) return 0;
+    if (ctx->state != HS_INIT || in->ver != PROTOCOL_VERSION) {
+        util_log_write(LOG_WARN, "server_recv_hello: 거부 (핸드셰이크 상태 불일치 또는 프로토콜 버전 불일치)");
+        return 0;
+    }
 
     // client_id, nonce를 자기 ctx에 보관, 이후에도 사용
     memcpy(ctx->client_id, in->client_id, CLIENT_ID_BYTE);
     memcpy(ctx->client_nonce, in->client_nonce, NONCE_BYTE);
 
     ctx->state = HS_HELLO_SENT;
+    util_log_write(LOG_INFO, "server_recv_hello: HELLO 수신 처리 완료, 핸드셰이크 상태: HS_HELLO_SENT");
     return 1;
 }
 
@@ -345,7 +369,12 @@ int server_challenge(handshake_ctx* ctx, msg_challenge* out) {
     success = 1;
 
 done:
-    if (success != 1 && ctx != NULL) ctx->state = HS_FAILED;
+    if (success == 1) {
+        util_log_write(LOG_INFO, "server_challenge: CHALLENGE 서명 생성 완료, 핸드셰이크 상태: HS_CHALLENGED");
+    } else {
+        if (ctx != NULL) ctx->state = HS_FAILED;
+        util_log_write(LOG_ERROR, "server_challenge: 실패, 핸드셰이크 상태: HS_FAILED");
+    }
     return success;
 }
 
@@ -384,7 +413,12 @@ int server_recv_auth(handshake_ctx* ctx, const msg_auth* in,
 
 done:
     OPENSSL_cleanse(keys, sizeof keys);   // 세션키 평문 사본 소거 (성공/실패 공통)
-    if (success != 1 && ctx != NULL) ctx->state = HS_FAILED;
+    if (success == 1) {
+        util_log_write(LOG_INFO, "server_recv_auth: 클라 서명 검증/세션키 복호화 성공, 핸드셰이크 상태: HS_AUTHED");
+    } else {
+        if (ctx != NULL) ctx->state = HS_FAILED;
+        util_log_write(LOG_ERROR, "server_recv_auth: 클라 서명 검증 또는 세션키 복호화 실패, 핸드셰이크 상태: HS_FAILED");
+    }
     return success;
 }
 
@@ -425,6 +459,11 @@ int server_auth_ok(handshake_ctx* ctx, msg_auth_ok* out) {
     success = 1;
 
 done:
-    if (success != 1 && ctx != NULL) ctx->state = HS_FAILED;
+    if (success == 1) {
+        util_log_write(LOG_INFO, "server_auth_ok: AUTH_OK 암호화 완료, 핸드셰이크 수립(HS_ESTABLISHED)");
+    } else {
+        if (ctx != NULL) ctx->state = HS_FAILED;
+        util_log_write(LOG_ERROR, "server_auth_ok: AUTH_OK 암호화 실패, 핸드셰이크 상태: HS_FAILED");
+    }
     return success;
 }
