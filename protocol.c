@@ -180,23 +180,31 @@ int client_hello(handshake_ctx* ctx, const unsigned char client_id[CLIENT_ID_BYT
     if (ctx == NULL || client_id == NULL || out == NULL) return 0;
     if (ctx->state != HS_INIT) return 0;
 
+    int success = 0;
+
     // client_id를 자기 ctx에 보관, 이후에도 사용
     memcpy(ctx->client_id, client_id, CLIENT_ID_BYTE);
-    if (rand_bytes(ctx->client_nonce, NONCE_BYTE) != 1) return 0;
+    if (rand_bytes(ctx->client_nonce, NONCE_BYTE) != 1) goto done;
 
     // out 데이터 채우기
     out->ver = PROTOCOL_VERSION;
     memcpy(out->client_id, ctx->client_id, CLIENT_ID_BYTE);
     memcpy(out->client_nonce, ctx->client_nonce, NONCE_BYTE);
     ctx->state = HS_HELLO_SENT;
-    
-    return 1;
+
+    success = 1;
+
+done:
+    if (success != 1 && ctx != NULL) ctx->state = HS_FAILED;
+    return success;
 }
 
 // SERVER_CHALLENGE를 받는 부분
 int client_recv_challenge(handshake_ctx* ctx, const msg_challenge* in) {
     if (ctx == NULL || in == NULL) return 0;
     if (ctx->state != HS_HELLO_SENT) return 0;
+
+    int success = 0;
 
     // server_nonce를 ctx에 보관
     memcpy(ctx->server_nonce, in->server_nonce, NONCE_BYTE);
@@ -209,10 +217,14 @@ int client_recv_challenge(handshake_ctx* ctx, const msg_challenge* in) {
     memcpy(to_verify + offset, ctx->client_id, CLIENT_ID_BYTE);
 
     if (rsa_pss_verify(ctx->peer_pub, to_verify, SIGN2_INPUT_BYTE, 
-                       in->signature, RSA_MODULUS_BYTE) != 1) return 0;
+                       in->signature, RSA_MODULUS_BYTE) != 1) goto done;
 
     ctx->state = HS_CHALLENGED;
-    return 1;
+    success = 1;
+
+done:
+    if (success != 1 && ctx != NULL) ctx->state = HS_FAILED;
+    return success;
 }
 
 // CLIENT_AUTH 전송 및 RSA 키 교환
@@ -221,9 +233,12 @@ int client_auth(handshake_ctx* ctx, msg_auth* out,
     if (ctx == NULL || out == NULL || k_c2s == NULL || k_s2c == NULL) return 0;
     if (ctx->state != HS_CHALLENGED) return 0;
 
+    int success = 0;
+    unsigned char keys[SESSION_KEYS_BYTE] = {0};
+
     // Client <-> Server 방향 세션키를 생성하고 자기 ctx에 복사
     if (rand_bytes(ctx->k_c2s, AEAD_KEY_BYTE) != 1 ||
-        rand_bytes(ctx->k_s2c, AEAD_KEY_BYTE) != 1) return 0;
+        rand_bytes(ctx->k_s2c, AEAD_KEY_BYTE) != 1) goto done;
 
     // RSA-PSS 서명 대상 데이터 조립 및 서명
     unsigned char to_sign[SIGN3_INPUT_BYTE];
@@ -231,26 +246,65 @@ int client_auth(handshake_ctx* ctx, msg_auth* out,
     memcpy(to_sign + offset, ctx->server_nonce, NONCE_BYTE);    offset += NONCE_BYTE;
     memcpy(to_sign + offset, ctx->client_nonce, NONCE_BYTE);
     if (rsa_pss_sign(ctx->self_priv, to_sign, SIGN3_INPUT_BYTE,
-                    out->signature, RSA_MODULUS_BYTE) != 1) return 0;
+                    out->signature, RSA_MODULUS_BYTE) != 1) goto done;
 
     // 세션키 2개를 이어붙여 RSA-OAEP 암호화
-    unsigned char keys[SESSION_KEYS_BYTE];
     memcpy(keys, ctx->k_c2s, AEAD_KEY_BYTE);
     memcpy(keys + AEAD_KEY_BYTE, ctx->k_s2c, AEAD_KEY_BYTE);
 
     size_t enc_len = sizeof(out->enc_keys);
-    int ok = rsa_oaep_encrypt(ctx->peer_pub, keys, SESSION_KEYS_BYTE,
-                              out->enc_keys, &enc_len);
-    OPENSSL_cleanse(keys, sizeof keys);
-    if (ok != 1) return 0;
+    if (rsa_oaep_encrypt(ctx->peer_pub, keys, SESSION_KEYS_BYTE,
+                         out->enc_keys, &enc_len) != 1) goto done;
 
     // 만들어진 세션키 두 개를 내보냄
     memcpy(k_c2s, ctx->k_c2s, AEAD_KEY_BYTE);
     memcpy(k_s2c, ctx->k_s2c, AEAD_KEY_BYTE);
 
     ctx->state = HS_AUTHED;
-    return 1;
+    success = 1;
+
+done:
+    OPENSSL_cleanse(keys, sizeof keys);   // 세션키 평문 사본 소거 (성공/실패 공통)
+    if (success != 1 && ctx != NULL) ctx->state = HS_FAILED;
+    return success;
 }
+
+// CLIENT_RECV_AUTH_OK: AUTH_OK를 받아 복호화하고 "OK"인지 확인하는 부분
+int client_recv_auth_ok(handshake_ctx* ctx, const msg_auth_ok* in) {
+    if (ctx == NULL || in == NULL) return 0;
+    if (ctx->state != HS_AUTHED) return 0;
+
+    int success = 0;
+    unsigned char plaintext[AUTH_OK_CT_BYTE] = {0};
+
+    // AAD는 암호화 측(server_auth_ok)과 완전히 동일하게 재구성해야 한다.
+    // 순서: [client_nonce][server_nonce]
+    unsigned char aad[NONCE_BYTE + NONCE_BYTE];
+    memcpy(aad, ctx->client_nonce, NONCE_BYTE);
+    memcpy(aad + NONCE_BYTE, ctx->server_nonce, NONCE_BYTE);
+
+    // nonce는 서버가 실어 보낸 in->nonce를 그대로 사용.
+    // 복호화는 server_auth_ok와 같은 방향키(k_s2c)로 수행.
+    size_t pt_len = 0;
+
+    if (aead_decrypt(ctx->k_s2c, in->nonce, aad, sizeof aad,
+                     in->ciphertext, AUTH_OK_CT_BYTE,
+                     plaintext, &pt_len, in->tag) != 1) goto done;
+
+    // 평문이 정확히 "OK"(AUTH_OK_CT_BYTE 바이트)인지 확인.
+    const unsigned char expected[] = AUTH_OK_PLAINTEXT;   // {'O','K','\0'}
+    if (pt_len != AUTH_OK_CT_BYTE) goto done;
+    if (memcmp(plaintext, expected, AUTH_OK_CT_BYTE) != 0) goto done;
+
+    ctx->state = HS_ESTABLISHED;
+    success = 1;
+
+done:
+    OPENSSL_cleanse(plaintext, sizeof plaintext);
+    if (success != 1 && ctx != NULL) ctx->state = HS_FAILED;
+    return success;
+}
+
 
 // --- Server 측 처리 ------------------------------------------
 // CLIENT_HELLO를 받는 부분
@@ -271,8 +325,10 @@ int server_challenge(handshake_ctx* ctx, msg_challenge* out) {
     if (ctx == NULL || out == NULL) return 0;
     if (ctx->state != HS_HELLO_SENT) return 0;
 
+    int success = 0;
+
     // server nonce 생성, 자기 ctx에 보관
-    if (rand_bytes(ctx->server_nonce, NONCE_BYTE) != 1) return 0;
+    if (rand_bytes(ctx->server_nonce, NONCE_BYTE) != 1) goto done;
     memcpy(out->server_nonce, ctx->server_nonce, NONCE_BYTE);
 
     // 서명 대상 데이터 조립 및 서명
@@ -283,10 +339,14 @@ int server_challenge(handshake_ctx* ctx, msg_challenge* out) {
     memcpy(to_sign + offset, ctx->client_id, CLIENT_ID_BYTE);
 
     if (rsa_pss_sign(ctx->self_priv, to_sign, SIGN2_INPUT_BYTE,
-                    out->signature, RSA_MODULUS_BYTE) != 1) return 0;
-    
+                    out->signature, RSA_MODULUS_BYTE) != 1) goto done;
+
     ctx->state = HS_CHALLENGED;
-    return 1;
+    success = 1;
+
+done:
+    if (success != 1 && ctx != NULL) ctx->state = HS_FAILED;
+    return success;
 }
 
 // CLIENT_AUTH 수신 및 RSA 키 교환 (복호화한 키 두 개를 호출자 버퍼로 내보냄)
@@ -295,6 +355,9 @@ int server_recv_auth(handshake_ctx* ctx, const msg_auth* in,
     if (ctx == NULL || in == NULL || k_c2s == NULL || k_s2c == NULL) return 0;
     if (ctx->state != HS_CHALLENGED) return 0;
 
+    int success = 0;
+    unsigned char keys[SESSION_KEYS_BYTE] = {0};
+
     // RSA-PSS 서명 검증
     unsigned char to_verify[SIGN3_INPUT_BYTE];
     size_t offset = 0;
@@ -302,33 +365,35 @@ int server_recv_auth(handshake_ctx* ctx, const msg_auth* in,
     memcpy(to_verify + offset, ctx->client_nonce, NONCE_BYTE);
 
     if (rsa_pss_verify(ctx->peer_pub, to_verify, SIGN3_INPUT_BYTE,
-                       in->signature, RSA_MODULUS_BYTE) != 1) return 0;
-    
+                       in->signature, RSA_MODULUS_BYTE) != 1) goto done;
+
     // RSA-OAEP로 세션키 복호화
-    unsigned char keys[SESSION_KEYS_BYTE];
     size_t keys_len = sizeof keys;
     if (rsa_oaep_decrypt(ctx->self_priv, in->enc_keys, RSA_MODULUS_BYTE,
-                         keys, &keys_len) != 1 || keys_len != SESSION_KEYS_BYTE) {
-        OPENSSL_cleanse(keys, sizeof keys);
-        return 0;
-    }
+                         keys, &keys_len) != 1 || keys_len != SESSION_KEYS_BYTE) goto done;
 
     memcpy(ctx->k_c2s, keys, AEAD_KEY_BYTE);
     memcpy(ctx->k_s2c, keys + AEAD_KEY_BYTE, AEAD_KEY_BYTE);
-    OPENSSL_cleanse(keys, sizeof keys);
 
     // 만들어진 세션키 두 개를 내보냄
     memcpy(k_c2s, ctx->k_c2s, AEAD_KEY_BYTE);
     memcpy(k_s2c, ctx->k_s2c, AEAD_KEY_BYTE);
 
     ctx->state = HS_AUTHED;
-    return 1;
+    success = 1;
+
+done:
+    OPENSSL_cleanse(keys, sizeof keys);   // 세션키 평문 사본 소거 (성공/실패 공통)
+    if (success != 1 && ctx != NULL) ctx->state = HS_FAILED;
+    return success;
 }
 
 // SERVER_AUTH_OK를 보내는 부분
 int server_auth_ok(handshake_ctx* ctx, msg_auth_ok* out) {
     if (ctx == NULL || out == NULL) return 0;
     if (ctx->state != HS_AUTHED) return 0;
+
+    int success = 0;
 
     // AUTH_OK 평문: "OK"
     // nonce: 랜덤 생성해서 암호문과 태그에 같이 실어 보냄
@@ -338,7 +403,7 @@ int server_auth_ok(handshake_ctx* ctx, msg_auth_ok* out) {
     memcpy(aad + NONCE_BYTE, ctx->server_nonce, NONCE_BYTE);
 
     unsigned char nonce[AEAD_NONCE_BYTE];
-    if (rand_bytes(nonce, AEAD_NONCE_BYTE) != 1) return 0;
+    if (rand_bytes(nonce, AEAD_NONCE_BYTE) != 1) goto done;
 
     const unsigned char plaintext[] = AUTH_OK_PLAINTEXT;
     unsigned char tag[AEAD_TAG_BYTE] = {0};
@@ -349,7 +414,7 @@ int server_auth_ok(handshake_ctx* ctx, msg_auth_ok* out) {
     // 평문 길이는 널 종단 문자를 뺀 AUTH_OK_CT_BYTE(2). sizeof plaintext(3)를
     // 쓰면 암호문이 ciphertext 버퍼(AUTH_OK_CT_BYTE)를 넘겨 오버플로우가 난다.
     if (aead_encrypt(ctx->k_s2c, nonce, aad, sizeof aad,
-                     plaintext, AUTH_OK_CT_BYTE, ciphertext, &ct_len, tag) != 1) return 0;
+                     plaintext, AUTH_OK_CT_BYTE, ciphertext, &ct_len, tag) != 1) goto done;
 
     // 데이터 내보내기
     memcpy(out->nonce, nonce, AEAD_NONCE_BYTE);
@@ -357,34 +422,9 @@ int server_auth_ok(handshake_ctx* ctx, msg_auth_ok* out) {
     memcpy(out->tag, tag, AEAD_TAG_BYTE);
 
     ctx->state = HS_ESTABLISHED;
-    return 1;
-}
+    success = 1;
 
-// CLIENT_RECV_AUTH_OK: AUTH_OK를 받아 복호화하고 "OK"인지 확인하는 부분
-int client_recv_auth_ok(handshake_ctx* ctx, const msg_auth_ok* in) {
-    if (ctx == NULL || in == NULL) return 0;
-    if (ctx->state != HS_AUTHED) return 0;
-
-    // AAD는 암호화 측(server_auth_ok)과 완전히 동일하게 재구성해야 한다.
-    // 순서: [client_nonce][server_nonce]
-    unsigned char aad[NONCE_BYTE + NONCE_BYTE];
-    memcpy(aad, ctx->client_nonce, NONCE_BYTE);
-    memcpy(aad + NONCE_BYTE, ctx->server_nonce, NONCE_BYTE);
-
-    // nonce는 서버가 실어 보낸 in->nonce를 그대로 사용.
-    // 복호화는 server_auth_ok와 같은 방향키(k_s2c)로 수행.
-    unsigned char plaintext[AUTH_OK_CT_BYTE] = {0};
-    size_t pt_len = 0;
-
-    if (aead_decrypt(ctx->k_s2c, in->nonce, aad, sizeof aad,
-                     in->ciphertext, AUTH_OK_CT_BYTE,
-                     plaintext, &pt_len, in->tag) != 1) return 0;
-
-    // 평문이 정확히 "OK"(AUTH_OK_CT_BYTE 바이트)인지 확인.
-    const unsigned char expected[] = AUTH_OK_PLAINTEXT;   // {'O','K','\0'}
-    if (pt_len != AUTH_OK_CT_BYTE) return 0;
-    if (memcmp(plaintext, expected, AUTH_OK_CT_BYTE) != 0) return 0;
-
-    ctx->state = HS_ESTABLISHED;
-    return 1;
+done:
+    if (success != 1 && ctx != NULL) ctx->state = HS_FAILED;
+    return success;
 }
