@@ -10,6 +10,8 @@
 #include <openssl/err.h>
 #include <openssl/rsa.h>
 
+#include <stddef.h>
+
 #define PBKDF2_SALT_BYTE    16
 #define PBKDF2_KEY_BYTE     32
 #define PBKDF2_ITERATIONS   200000
@@ -26,14 +28,23 @@
 #define COMMIT_NONCE_BYTE   32
 #define SHA256_BYTE         32
 
-
-static void hexprint(const unsigned char* p, size_t n);
-
 // 함수 선언부
 int commit_hash(
-    const unsigned char game_id[GAME_ID_BYTE], unsigned char liar_id, 
+    unsigned char liar_id,
     const unsigned char nonce[COMMIT_NONCE_BYTE], unsigned char out[SHA256_BYTE]
 );
+
+// 3072비트 RSA 키쌍 생성.
+EVP_PKEY* rsa_generate_key(void);
+
+// 공개키 DER의 SHA-256 앞 16바이트를 안정적인 클라이언트 ID로 사용한다.
+int rsa_public_key_id(EVP_PKEY* key, unsigned char out[GAME_ID_BYTE]);
+
+// PBKDF2와 AES-256-GCM으로 암호화한 개인키 파일을 불러온다.
+// 파일이 없으면 새 키를 생성해 mode 0600 파일로 저장한다.
+int private_key_load_or_create(const char* path,
+                               const unsigned char* password, size_t password_len,
+                               EVP_PKEY** out_key);
 
 int rand_bytes(unsigned char* buf, size_t n);
 

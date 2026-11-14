@@ -16,13 +16,29 @@
 
 // Challenge 서명 대상: client_nonce || server_nonce || client_id
 #define SIGN2_INPUT_BYTE    (NONCE_BYTE + NONCE_BYTE + CLIENT_ID_BYTE)
-// AUTH 서명 대상: server_nonce || client_nonce
-#define SIGN3_INPUT_BYTE    (NONCE_BYTE + NONCE_BYTE)
+// AUTH 서명 대상: label || version || client_id || client_nonce ||
+//                  server_nonce || OAEP(session_keys)
+#define AUTH_LABEL          "LIAR_AUTH_V1"
+#define AUTH_LABEL_BYTE     12
+#define SIGN3_INPUT_BYTE    (AUTH_LABEL_BYTE + 1 + CLIENT_ID_BYTE + \
+                             NONCE_BYTE + NONCE_BYTE + RSA_MODULUS_BYTE)
 
 // AUTH_OK의 AES-GCM 평문 & 암호문 길이 
 // GCM은 암호문 길이 = 평문 길이, but sizeof AUTH_OK_PLAINTEXT = 3
 #define AUTH_OK_PLAINTEXT   "OK"
 #define AUTH_OK_CT_BYTE     2
+
+// VOTE 서명 대상: target(1B) || voter_id(CLIENT_ID_BYTE)
+#define VOTE_SIGN_INPUT_BYTE  (1 + CLIENT_ID_BYTE)
+// VOTE 패킷 평문: target(1B) || signature(RSA_MODULUS_BYTE)
+#define VOTE_PLAINTEXT_BYTE   (1 + RSA_MODULUS_BYTE)
+// COMMIT 패킷 평문: commit_hash(SHA256_BYTE) || signature(RSA_MODULUS_BYTE)
+#define COMMIT_PLAINTEXT_BYTE (SHA256_BYTE + RSA_MODULUS_BYTE)
+// LOBBY 평문: phase(1B) || player_count(1B) || receiver_slot(1B)
+#define LOBBY_PLAINTEXT_BYTE  3
+// END 평문: result(1B) || liar_id(1B) || nonce || signature
+#define END_SIGN_INPUT_BYTE   (1 + 1 + COMMIT_NONCE_BYTE + SHA256_BYTE)
+#define END_PLAINTEXT_BYTE    (1 + 1 + COMMIT_NONCE_BYTE + RSA_MODULUS_BYTE)
 
 
 // 메시지 타입
@@ -197,5 +213,36 @@ int io_read_blob(int fd, unsigned char* buf, size_t* len);
 // 완성 패킷 한 건 송수신 (앞 4B len 필드로 경계 파악).
 int io_write_packet(int fd, const unsigned char* pkt, size_t pkt_len);
 int io_read_packet(int fd, unsigned char* buf, size_t* len);
+
+
+// ===== 투표 서명 (RSA-PSS) =====
+
+// VOTE 평문 구성: target과 voter_id로 서명 대상을 만들고 self_priv로 서명해
+// out[VOTE_PLAINTEXT_BYTE] = target(1B) || signature 를 채운다. 성공 1 / 실패 0.
+int vote_build(EVP_PKEY* self_priv, unsigned char target,
+               const unsigned char voter_id[CLIENT_ID_BYTE],
+               unsigned char* out, size_t* out_len);
+
+// VOTE 평문 검증: voter_pub로 서명을 확인하고 target을 돌려준다.
+// 성공(서명 유효) 1 / 실패 0.
+int vote_verify(EVP_PKEY* voter_pub,
+                const unsigned char voter_id[CLIENT_ID_BYTE],
+                const unsigned char* in, size_t in_len,
+                unsigned char* out_target);
+
+// 서버 커밋 해시와 RSA-PSS 서명을 구성하고 검증한다.
+int commit_build(EVP_PKEY* server_priv,
+                 const unsigned char hash[SHA256_BYTE],
+                 unsigned char out[COMMIT_PLAINTEXT_BYTE]);
+int commit_verify(EVP_PKEY* server_pub, const unsigned char* in, size_t in_len,
+                  unsigned char out_hash[SHA256_BYTE]);
+
+// 결과, 공개값, 최초 커밋을 묶어 서버가 서명한 END를 구성하고 검증한다.
+int end_build(EVP_PKEY* server_priv, unsigned char result, unsigned char liar_id,
+              const unsigned char nonce[COMMIT_NONCE_BYTE],
+              const unsigned char commit[SHA256_BYTE],
+              unsigned char out[END_PLAINTEXT_BYTE]);
+int end_verify(EVP_PKEY* server_pub, const unsigned char* in, size_t in_len,
+               const unsigned char commit[SHA256_BYTE]);
 
 #endif

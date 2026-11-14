@@ -10,6 +10,8 @@
 #define GAME_MAX_PLAYERS    4
 #define GAME_MIN_PLAYERS    3
 #define HINT_ROUNDS         2       // 발언 바퀴 수 (1인당 총 발언 수)
+#define HINT_TIMEOUT_SEC    60      // 한 번의 발언 제한 시간
+#define VOTE_TIMEOUT_SEC    30      // 전체 투표 제한 시간
 #define WORD_MAX_BYTE       64      // 제시어/카테고리 최대 바이트
 #define CATEGORY_MAX_BYTE   64
 
@@ -70,6 +72,9 @@ void game_init(game_state* gs);
 // 정원 초과 또는 LOBBY가 아니면 실패.
 int game_add_player(game_state* gs, const unsigned char id[GAME_ID_BYTE], int* out_index);
 
+// 로비에서 연결이 끊긴 플레이어를 제거한다.
+int game_remove_player(game_state* gs, int index);
+
 // 플레이어를 READY로 표시. 유효하지 않은 슬롯이면 실패.
 int game_set_ready(game_state* gs, int index);
 
@@ -96,6 +101,12 @@ int game_current_speaker(const game_state* gs);
 // index가 현재 발언자가 아니거나 발언 횟수를 초과하면 실패.
 // 모든 발언이 끝나면 자동으로 VOTE 페이즈로 전이.
 int game_submit_hint(game_state* gs, int index);
+
+// 현재 발언자의 제한 시간이 끝난 것으로 기록하고 다음 턴으로 넘긴다.
+int game_timeout_hint(game_state* gs);
+
+// 투표 제한 시간이 끝나면 미투표를 확정하고 라이어 승으로 종료한다.
+int game_timeout_vote(game_state* gs);
 
 // 투표 기록. voter가 target 슬롯을 지목. 서명 검증은 호출자(server)가 선행.
 // 중복 투표/잘못된 슬롯이면 실패. 전원 투표 완료 시 END로 전이하며 판정.

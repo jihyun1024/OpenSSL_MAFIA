@@ -4,6 +4,8 @@
 #include <stddef.h>   
 #include <unistd.h>
 #include <errno.h>
+#include <limits.h>
+#include <sys/socket.h>
 
 
 // =====================================================================
@@ -144,7 +146,7 @@ int decode_auth_ok(const unsigned char* in, size_t in_len, msg_auth_ok* m) {
 //   - 넘겨받은 키 포인터를 저장한다. 키의 소유권은 호출자에게 있으며,
 //     hs_ctx_free는 이 키들을 해제하지 않음
 int hs_ctx_init(handshake_ctx* ctx, EVP_PKEY* self_priv, EVP_PKEY* peer_pub) {
-    if (ctx == NULL) return 0;
+    if (ctx == NULL || self_priv == NULL || peer_pub == NULL) return 0;
 
     memset(ctx, 0, sizeof(*ctx));   // nonce/키 버퍼 0, 포인터 NULL로 정리
 
@@ -239,6 +241,19 @@ done:
     return success;
 }
 
+// AUTH 서명 입력은 전체 협상 문맥과 OAEP 암호문을 정규 순서로 묶는다.
+static void build_auth_signinput(const handshake_ctx* ctx,
+                                 const unsigned char enc_keys[RSA_MODULUS_BYTE],
+                                 unsigned char out[SIGN3_INPUT_BYTE]) {
+    size_t offset = 0;
+    memcpy(out + offset, AUTH_LABEL, AUTH_LABEL_BYTE); offset += AUTH_LABEL_BYTE;
+    out[offset++] = PROTOCOL_VERSION;
+    memcpy(out + offset, ctx->client_id, CLIENT_ID_BYTE); offset += CLIENT_ID_BYTE;
+    memcpy(out + offset, ctx->client_nonce, NONCE_BYTE); offset += NONCE_BYTE;
+    memcpy(out + offset, ctx->server_nonce, NONCE_BYTE); offset += NONCE_BYTE;
+    memcpy(out + offset, enc_keys, RSA_MODULUS_BYTE);
+}
+
 // CLIENT_AUTH 전송 및 RSA 키 교환
 int client_auth(handshake_ctx* ctx, msg_auth* out,
                 unsigned char k_c2s[AEAD_KEY_BYTE], unsigned char k_s2c[AEAD_KEY_BYTE]) {
@@ -252,21 +267,21 @@ int client_auth(handshake_ctx* ctx, msg_auth* out,
     if (rand_bytes(ctx->k_c2s, AEAD_KEY_BYTE) != 1 ||
         rand_bytes(ctx->k_s2c, AEAD_KEY_BYTE) != 1) goto done;
 
-    // RSA-PSS 서명 대상 데이터 조립 및 서명
-    unsigned char to_sign[SIGN3_INPUT_BYTE];
-    size_t offset = 0;
-    memcpy(to_sign + offset, ctx->server_nonce, NONCE_BYTE);    offset += NONCE_BYTE;
-    memcpy(to_sign + offset, ctx->client_nonce, NONCE_BYTE);
-    if (rsa_pss_sign(ctx->self_priv, to_sign, SIGN3_INPUT_BYTE,
-                    out->signature, RSA_MODULUS_BYTE) != 1) goto done;
-
-    // 세션키 2개를 이어붙여 RSA-OAEP 암호화
+    // 세션키 2개를 이어붙여 RSA-OAEP 암호화한다.
     memcpy(keys, ctx->k_c2s, AEAD_KEY_BYTE);
     memcpy(keys + AEAD_KEY_BYTE, ctx->k_s2c, AEAD_KEY_BYTE);
-
-    size_t enc_len = sizeof(out->enc_keys);
+    size_t enc_len = sizeof out->enc_keys;
     if (rsa_oaep_encrypt(ctx->peer_pub, keys, SESSION_KEYS_BYTE,
-                         out->enc_keys, &enc_len) != 1) goto done;
+                         out->enc_keys, &enc_len) != 1 ||
+        enc_len != sizeof out->enc_keys)
+        goto done;
+
+    // 협상 문맥과 실제 OAEP 암호문 전체에 서명해 키 바꿔치기를 막는다.
+    unsigned char to_sign[SIGN3_INPUT_BYTE];
+    build_auth_signinput(ctx, out->enc_keys, to_sign);
+    if (rsa_pss_sign(ctx->self_priv, to_sign, sizeof to_sign,
+                     out->signature, RSA_MODULUS_BYTE) != 1)
+        goto done;
 
     // 만들어진 세션키 두 개를 내보냄
     memcpy(k_c2s, ctx->k_c2s, AEAD_KEY_BYTE);
@@ -302,7 +317,7 @@ int client_recv_auth_ok(handshake_ctx* ctx, const msg_auth_ok* in) {
 
     // nonce는 서버가 실어 보낸 in->nonce를 그대로 사용.
     // 복호화는 server_auth_ok와 같은 방향키(k_s2c)로 수행.
-    size_t pt_len = 0;
+    size_t pt_len = sizeof plaintext;
 
     if (aead_decrypt(ctx->k_s2c, in->nonce, aad, sizeof aad,
                      in->ciphertext, AUTH_OK_CT_BYTE,
@@ -389,14 +404,12 @@ int server_recv_auth(handshake_ctx* ctx, const msg_auth* in,
     int success = 0;
     unsigned char keys[SESSION_KEYS_BYTE] = {0};
 
-    // RSA-PSS 서명 검증
+    // 서명된 협상 문맥에 현재 받은 OAEP 암호문이 포함되어야 한다.
     unsigned char to_verify[SIGN3_INPUT_BYTE];
-    size_t offset = 0;
-    memcpy(to_verify + offset, ctx->server_nonce, NONCE_BYTE);  offset += NONCE_BYTE;
-    memcpy(to_verify + offset, ctx->client_nonce, NONCE_BYTE);
-
-    if (rsa_pss_verify(ctx->peer_pub, to_verify, SIGN3_INPUT_BYTE,
-                       in->signature, RSA_MODULUS_BYTE) != 1) goto done;
+    build_auth_signinput(ctx, in->enc_keys, to_verify);
+    if (rsa_pss_verify(ctx->peer_pub, to_verify, sizeof to_verify,
+                       in->signature, RSA_MODULUS_BYTE) != 1)
+        goto done;
 
     // RSA-OAEP로 세션키 복호화
     size_t keys_len = sizeof keys;
@@ -534,7 +547,7 @@ int packet_seal(sec_channel* ch, unsigned char type,
                 const unsigned char* plaintext, size_t plaintext_len,
                 unsigned char* out, size_t* out_len) {
     if (ch == NULL || out == NULL || out_len == NULL) return 0;
-    if (plaintext_len > PKT_MAX_PLAINTEXT) return 0;
+    if (plaintext_len > PKT_MAX_PLAINTEXT || ch->tx_seq == ULLONG_MAX) return 0;
     if (plaintext_len > 0 && plaintext == NULL) return 0;
 
     size_t need = PKT_LEN_BYTE + PKT_MIN_BODY_BYTE + plaintext_len;
@@ -634,7 +647,7 @@ int packet_open(sec_channel* ch,
 int io_write_all(int fd, const unsigned char* buf, size_t len) {
     size_t off = 0;
     while (off < len) {
-        ssize_t n = write(fd, buf + off, len - off);
+        ssize_t n = send(fd, buf + off, len - off, MSG_NOSIGNAL);
         if (n < 0) { if (errno == EINTR) continue; return 0; }
         if (n == 0) return 0;
         off += (size_t)n;
@@ -654,7 +667,7 @@ int io_read_all(int fd, unsigned char* buf, size_t len) {
 }
 
 int io_write_blob(int fd, const unsigned char* data, size_t len) {
-    if (data == NULL && len > 0) return 0;
+    if ((data == NULL && len > 0) || len > UINT_MAX) return 0;
     unsigned char hdr[4];
     put_u32_be(hdr, (unsigned int)len);
     if (io_write_all(fd, hdr, 4) != 1) return 0;
@@ -684,9 +697,118 @@ int io_read_packet(int fd, unsigned char* buf, size_t* len) {
     // 선두 4B len 필드 읽기
     if (io_read_all(fd, buf, PKT_LEN_BYTE) != 1) return 0;
     unsigned int body = get_u32_be(buf);
+    if (body < PKT_MIN_BODY_BYTE ||
+        body > PKT_MIN_BODY_BYTE + PKT_MAX_PLAINTEXT)
+        return 0;
     size_t total = (size_t)PKT_LEN_BYTE + body;
-    if (total > *len || body == 0) return 0;
+    if (total > *len) return 0;
     if (io_read_all(fd, buf + PKT_LEN_BYTE, body) != 1) return 0;
     *len = total;
     return 1;
+}
+
+
+// ===== 투표 서명 (RSA-PSS) =====
+
+// 서명 대상 = target(1B) || voter_id(CLIENT_ID_BYTE)
+static void build_vote_signinput(unsigned char* buf, unsigned char target,
+                                 const unsigned char* voter_id) {
+    buf[0] = target;
+    memcpy(buf + 1, voter_id, CLIENT_ID_BYTE);
+}
+
+int vote_build(EVP_PKEY* self_priv, unsigned char target,
+               const unsigned char voter_id[CLIENT_ID_BYTE],
+               unsigned char* out, size_t* out_len) {
+    if (self_priv == NULL || voter_id == NULL || out == NULL || out_len == NULL) return 0;
+    if (*out_len < VOTE_PLAINTEXT_BYTE) return 0;
+
+    unsigned char si[VOTE_SIGN_INPUT_BYTE];
+    build_vote_signinput(si, target, voter_id);
+
+    out[0] = target;
+    if (rsa_pss_sign(self_priv, si, VOTE_SIGN_INPUT_BYTE,
+                     out + 1, RSA_MODULUS_BYTE) != 1) return 0;
+
+    *out_len = VOTE_PLAINTEXT_BYTE;
+    return 1;
+}
+
+int vote_verify(EVP_PKEY* voter_pub,
+                const unsigned char voter_id[CLIENT_ID_BYTE],
+                const unsigned char* in, size_t in_len,
+                unsigned char* out_target) {
+    if (voter_pub == NULL || voter_id == NULL || in == NULL) return 0;
+    if (in_len != VOTE_PLAINTEXT_BYTE) return 0;
+
+    unsigned char target = in[0];
+    unsigned char si[VOTE_SIGN_INPUT_BYTE];
+    build_vote_signinput(si, target, voter_id);
+
+    if (rsa_pss_verify(voter_pub, si, VOTE_SIGN_INPUT_BYTE,
+                       in + 1, RSA_MODULUS_BYTE) != 1) {
+        util_log_write(LOG_WARN, "vote_verify: 투표 서명 검증 실패");
+        return 0;
+    }
+    if (out_target != NULL) *out_target = target;
+    return 1;
+}
+
+// ===== 커밋 및 종료 서명 =====
+
+int commit_build(EVP_PKEY* server_priv,
+                 const unsigned char hash[SHA256_BYTE],
+                 unsigned char out[COMMIT_PLAINTEXT_BYTE]) {
+    if (server_priv == NULL || hash == NULL || out == NULL) return 0;
+    memcpy(out, hash, SHA256_BYTE);
+    return rsa_pss_sign(server_priv, hash, SHA256_BYTE,
+                        out + SHA256_BYTE, RSA_MODULUS_BYTE);
+}
+
+int commit_verify(EVP_PKEY* server_pub, const unsigned char* in, size_t in_len,
+                  unsigned char out_hash[SHA256_BYTE]) {
+    if (server_pub == NULL || in == NULL || out_hash == NULL ||
+        in_len != COMMIT_PLAINTEXT_BYTE)
+        return 0;
+    if (rsa_pss_verify(server_pub, in, SHA256_BYTE,
+                       in + SHA256_BYTE, RSA_MODULUS_BYTE) != 1)
+        return 0;
+    memcpy(out_hash, in, SHA256_BYTE);
+    return 1;
+}
+
+static void build_end_signinput(unsigned char out[END_SIGN_INPUT_BYTE],
+                                unsigned char result, unsigned char liar_id,
+                                const unsigned char nonce[COMMIT_NONCE_BYTE],
+                                const unsigned char commit[SHA256_BYTE]) {
+    out[0] = result;
+    out[1] = liar_id;
+    memcpy(out + 2, nonce, COMMIT_NONCE_BYTE);
+    memcpy(out + 2 + COMMIT_NONCE_BYTE, commit, SHA256_BYTE);
+}
+
+int end_build(EVP_PKEY* server_priv, unsigned char result, unsigned char liar_id,
+              const unsigned char nonce[COMMIT_NONCE_BYTE],
+              const unsigned char commit[SHA256_BYTE],
+              unsigned char out[END_PLAINTEXT_BYTE]) {
+    if (server_priv == NULL || nonce == NULL || commit == NULL || out == NULL)
+        return 0;
+
+    unsigned char sign_input[END_SIGN_INPUT_BYTE];
+    build_end_signinput(sign_input, result, liar_id, nonce, commit);
+    memcpy(out, sign_input, 2 + COMMIT_NONCE_BYTE);
+    return rsa_pss_sign(server_priv, sign_input, sizeof sign_input,
+                        out + 2 + COMMIT_NONCE_BYTE, RSA_MODULUS_BYTE);
+}
+
+int end_verify(EVP_PKEY* server_pub, const unsigned char* in, size_t in_len,
+               const unsigned char commit[SHA256_BYTE]) {
+    if (server_pub == NULL || in == NULL || commit == NULL ||
+        in_len != END_PLAINTEXT_BYTE)
+        return 0;
+
+    unsigned char sign_input[END_SIGN_INPUT_BYTE];
+    build_end_signinput(sign_input, in[0], in[1], in + 2, commit);
+    return rsa_pss_verify(server_pub, sign_input, sizeof sign_input,
+                          in + 2 + COMMIT_NONCE_BYTE, RSA_MODULUS_BYTE);
 }
