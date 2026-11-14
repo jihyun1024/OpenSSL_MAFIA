@@ -178,10 +178,8 @@ static int demonstrate_game_rules(void) {
     if (setup_hint_game(&game, 2) != 1) return 0;
     for (int turn = 0; turn < GAME_MAX_PLAYERS * HINT_ROUNDS; turn++)
         if (game_timeout_hint(&game) != 1) return 0;
-    if (game.phase != PHASE_VOTE || game_timeout_vote(&game) != 1 ||
-        game_judge(&game) != RESULT_LIAR_WIN)
-        return 0;
-    puts("[통과] 발언/투표 시간 초과를 상태기계에 반영");
+    if (game.phase != PHASE_VOTE) return 0;
+    puts("[통과] 발언 시간 초과를 상태기계에 반영");
     return 1;
 }
 

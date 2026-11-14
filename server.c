@@ -231,13 +231,14 @@ static int run_game_master(void) {
     if (g_game.phase != PHASE_VOTE) goto done;
     send_lobby_status_locked();
 
-    struct timespec vote_deadline = deadline_after(VOTE_TIMEOUT_SEC);
+    // 투표에는 제한 시간을 두지 않는다. 전원이 투표를 마칠 때까지 기다리되,
+    // 투표 중 연결이 끊기면 더는 집계가 완료될 수 없으므로 게임을 중단한다.
     while (g_game.phase == PHASE_VOTE) {
-        int wait_result = pthread_cond_timedwait(&g_cond, &g_lock, &vote_deadline);
-        if (wait_result == ETIMEDOUT) {
-            game_timeout_vote(&g_game);
-            break;
+        if (any_connection_dead_locked()) {
+            util_log_write(LOG_WARN, "server: 투표 중 연결 종료, 게임 중단");
+            goto done;
         }
+        pthread_cond_wait(&g_cond, &g_lock);
     }
 
     game_result result = game_judge(&g_game);

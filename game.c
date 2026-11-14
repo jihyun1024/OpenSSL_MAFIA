@@ -306,14 +306,6 @@ int game_submit_vote(game_state* gs, int voter, int target) {
     return 1;
 }
 
-int game_timeout_vote(game_state* gs) {
-    if (gs == NULL || gs->phase != PHASE_VOTE) return 0;
-    gs->result = RESULT_LIAR_WIN;
-    gs->phase = PHASE_END;
-    util_log_write(LOG_WARN, "game: 투표 시간 초과, 라이어 승");
-    return 1;
-}
-
 game_result game_judge(const game_state* gs) {
     if (gs == NULL || gs->phase != PHASE_END) return RESULT_NONE;
     return gs->result;
