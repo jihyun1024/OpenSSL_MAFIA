@@ -14,8 +14,6 @@
 #include <unistd.h>
 
 #define MAX_PROTOCOL_FAILURES 3
-#define HANDSHAKE_TIMEOUT_SEC 15
-#define GAME_SEND_TIMEOUT_SEC 5
 
 // 게임 상태와 연결별 채널 송신 순서를 이 락 하나로 보호한다.
 static game_state g_game;
@@ -315,8 +313,21 @@ static void* player_thread(void* argument) {
         case MSG_VOTE: {
             unsigned char target;
             if (vote_verify(connection->peer_pub, connection->id,
-                            plaintext, plaintext_len, &target) == 1)
-                accepted = game_submit_vote(&g_game, connection->index, target);
+                            plaintext, plaintext_len, &target) != 1) {
+                // 서명 자체가 위조/손상된 경우에만 프로토콜 실패로 처리한다.
+                break;
+            }
+            accepted = game_submit_vote(&g_game, connection->index, target);
+            if (!accepted && g_game.phase == PHASE_VOTE &&
+                !g_game.players[connection->index].voted) {
+                // 서명은 유효하지만 없는 사람을 지목한 경우. 투표권을 잃지 않도록
+                // 실패로 누적하지 않고 다시 투표하라고만 알린다.
+                connection->failures = 0;
+                send_packet_locked(connection, MSG_PKT_ERROR, NULL, 0);
+                pthread_cond_broadcast(&g_cond);
+                pthread_mutex_unlock(&g_lock);
+                continue;
+            }
             break;
         }
 

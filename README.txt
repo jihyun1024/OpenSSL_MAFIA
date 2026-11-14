@@ -11,14 +11,18 @@
 
 서버:
 
-    ./liar_game server 9000 WORDS 4 server-key.enc
+    ./liar_game server 9000 WORDS 4 SERVER/server-key.enc
 
 클라이언트(각 플레이어가 서로 다른 키 파일을 사용):
 
-    ./liar_game client 127.0.0.1 9000 alice-key.enc
-    ./liar_game client 127.0.0.1 9000 bob-key.enc
-    ./liar_game client 127.0.0.1 9000 carol-key.enc
-    ./liar_game client 127.0.0.1 9000 dave-key.enc
+    ./liar_game client 127.0.0.1 9000 CLIENT/alice-key.enc
+    ./liar_game client 127.0.0.1 9000 CLIENT/bob-key.enc
+    ./liar_game client 127.0.0.1 9000 CLIENT/carol-key.enc
+    ./liar_game client 127.0.0.1 9000 CLIENT/dave-key.enc
+
+서버 키와 로그는 SERVER/ 폴더, 클라이언트 키와 로그는 CLIENT/ 폴더에
+보관됩니다. 두 폴더는 실행 시 자동으로 생성됩니다. 키 경로를 지정하지 않으면
+각각 SERVER/server-key.enc, CLIENT/client-key.enc를 사용합니다.
 
 개인키 암호는 실행할 때 터미널에서 입력합니다. 자동 실행이 필요하면
 LIAR_KEY_PASSWORD 환경 변수를 설정할 수 있습니다. 개인키 파일은 PBKDF2로
@@ -38,11 +42,12 @@ LIAR_KEY_PASSWORD 환경 변수를 설정할 수 있습니다. 개인키 파일�
 - 발언 시간 초과 시 다음 사람으로 넘어가며, 투표는 전원이 마칠 때까지
   기다립니다. 최다 득표가 동점이면 라이어가 승리합니다.
 
-로그
-====
+폴더 구조
+=========
 
-- 서버: server.log
-- 클라이언트: client-<공개키 기반 ID>.log
+- SERVER/: 서버 개인키(server-key.enc), 서버 로그(server.log)
+- CLIENT/: 클라이언트 개인키(*-key.enc), 서버 공개키 핀(*.server.pub),
+  클라이언트 로그(client-<공개키 기반 ID>.log)
 
 방어 시나리오 검증
 ==================

@@ -55,8 +55,7 @@ typedef enum {
     MSG_HINT      = 0x23,
     MSG_VOTE      = 0x24,
     MSG_END       = 0x25,
-    MSG_PKT_ERROR = 0x7F,   // 게임 프로토콜 패킷 오류 응답 코드
-    MSG_ERROR     = 0xFF
+    MSG_PKT_ERROR = 0x7F    // 게임 프로토콜 패킷 오류 응답 코드
 } msg_type;
 
 // 게임 프로토콜 패킷 구조 (핸드셰이크 이후 AES-GCM 보호 채널)

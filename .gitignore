@@ -5,3 +5,7 @@
 liar_game
 security_demo
 hybrid_demo
+
+# 클라이언트/서버 키쌍 및 로그 보관 폴더
+CLIENT/
+SERVER/

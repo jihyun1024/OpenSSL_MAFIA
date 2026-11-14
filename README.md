@@ -67,8 +67,12 @@ make clean
 모든 인자를 지정해 3인 게임을 시작하는 예시:
 
 ```bash
-./liar_game server 9000 WORDS 3 server-key.enc
+./liar_game server 9000 WORDS 3 SERVER/server-key.enc
 ```
+
+서버 키와 로그는 실행 폴더 하위의 `SERVER/` 디렉터리에 보관됩니다. 디렉터리가
+없으면 자동으로 만듭니다. 키 파일 경로를 지정하지 않으면 기본값
+`SERVER/server-key.enc`를 사용합니다.
 
 처음 실행하면 개인키 암호를 입력하라는 메시지가 나옵니다. 서버 개인키가
 없으면 새로 생성하며, 이후 실행에서는 같은 파일과 암호를 사용해야 합니다.
@@ -84,17 +88,21 @@ make clean
 예시:
 
 ```bash
-./liar_game client 127.0.0.1 9000 alice-key.enc
+./liar_game client 127.0.0.1 9000 CLIENT/alice-key.enc
 ```
+
+클라이언트 키와 로그는 실행 폴더 하위의 `CLIENT/` 디렉터리에 보관됩니다.
+디렉터리가 없으면 자동으로 만듭니다. 키 파일 경로를 지정하지 않으면 기본값
+`CLIENT/client-key.enc`를 사용합니다.
 
 한 컴퓨터에서 여러 클라이언트를 실행할 때는 각 플레이어가 서로 다른 키
 파일을 사용해야 합니다.
 
 ```bash
-./liar_game client 127.0.0.1 9000 alice-key.enc
-./liar_game client 127.0.0.1 9000 bob-key.enc
-./liar_game client 127.0.0.1 9000 carol-key.enc
-./liar_game client 127.0.0.1 9000 dave-key.enc
+./liar_game client 127.0.0.1 9000 CLIENT/alice-key.enc
+./liar_game client 127.0.0.1 9000 CLIENT/bob-key.enc
+./liar_game client 127.0.0.1 9000 CLIENT/carol-key.enc
+./liar_game client 127.0.0.1 9000 CLIENT/dave-key.enc
 ```
 
 각 명령은 별도의 터미널에서 실행합니다. 서버에서 3인 게임을 선택했다면
@@ -111,7 +119,7 @@ LIAR_KEY_PASSWORD='your-password' ./liar_game server 9000
 
 ```bash
 LIAR_KEY_PASSWORD='your-password' \
-  ./liar_game client 127.0.0.1 9000 alice-key.enc
+  ./liar_game client 127.0.0.1 9000 CLIENT/alice-key.enc
 ```
 
 개인키 파일은 PBKDF2로 유도한 키와 AES-256-GCM으로 암호화되며 파일 권한
@@ -138,7 +146,9 @@ LIAR_KEY_PASSWORD='your-password' \
 vote 2
 ```
 
-`2`는 화면에 표시된 플레이어 슬롯 번호입니다.
+`2`는 화면에 표시된 플레이어 슬롯 번호입니다. 존재하지 않는 슬롯을 지목하면
+투표가 거부되고 투표권은 그대로 유지되므로, 유효한 슬롯으로 다시 투표할 수
+있습니다.
 
 - 한 번의 발언 제한 시간: 60초
 - 투표에는 제한 시간이 없으며 전원이 투표를 마치면 집계합니다.
@@ -157,10 +167,13 @@ vote 2
 교체했다면 서버가 올바른지 먼저 확인한 다음 해당 `.server.pub` 파일을 직접
 삭제하고 다시 접속해야 합니다.
 
-## 로그
+## 폴더 구조
 
-- 서버 로그: `server.log`
-- 클라이언트 로그: `client-<공개키 기반 ID>.log`
+- `SERVER/`: 서버 개인키(`server-key.enc`)와 서버 로그(`server.log`)
+- `CLIENT/`: 클라이언트 개인키(`*-key.enc`), 서버 공개키 핀(`*.server.pub`),
+  클라이언트 로그(`client-<공개키 기반 ID>.log`)
+
+두 폴더는 실행 시 자동으로 생성됩니다.
 
 ## 보안 시나리오 테스트
 

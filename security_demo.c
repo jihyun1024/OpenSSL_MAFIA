@@ -180,6 +180,25 @@ static int demonstrate_game_rules(void) {
         if (game_timeout_hint(&game) != 1) return 0;
     if (game.phase != PHASE_VOTE) return 0;
     puts("[통과] 발언 시간 초과를 상태기계에 반영");
+
+    // 3인 게임에서 존재하지 않는 슬롯 3을 지목하면 거부되지만 투표권은 유지되어
+    // 유효한 슬롯으로 다시 투표할 수 있어야 한다.
+    game_init(&game);
+    for (int i = 0; i < GAME_MIN_PLAYERS; i++) {
+        unsigned char id[GAME_ID_BYTE] = {0};
+        id[0] = (unsigned char)(i + 1);
+        int slot;
+        if (game_add_player(&game, id, &slot) != 1) return 0;
+    }
+    game.liar_index = 1;
+    game.phase = PHASE_VOTE;
+    if (game_submit_vote(&game, 0, 3) != 0 || game.players[0].voted != 0)
+        return 0;
+    if (game_submit_vote(&game, 0, 1) != 1 || game.players[0].voted != 1)
+        return 0;
+    if (game_submit_vote(&game, 0, 2) != 0)   // 집계 전 재투표는 중복으로 거부
+        return 0;
+    puts("[통과] 없는 사람 지목은 거부하되 투표권을 유지");
     return 1;
 }
 

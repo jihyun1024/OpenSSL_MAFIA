@@ -12,6 +12,8 @@
 #include <unistd.h>
 
 #define PASSWORD_MAX_BYTE 256
+#define SERVER_DIR        "SERVER"
+#define CLIENT_DIR        "CLIENT"
 
 static void usage(const char* program) {
     fprintf(stderr,
@@ -94,15 +96,19 @@ int main(int argc, char** argv) {
         }
 
         const char* words_dir = argc >= 4 ? argv[3] : "WORDS";
-        const char* key_path = argc >= 6 ? argv[5] : "server-key.enc";
+        const char* key_path = argc >= 6 ? argv[5] : SERVER_DIR "/server-key.enc";
         unsigned char password[PASSWORD_MAX_BYTE];
         size_t password_len = 0;
+        if (util_ensure_dir(SERVER_DIR) != 1) {
+            fprintf(stderr, "%s 디렉터리를 만들지 못했습니다.\n", SERVER_DIR);
+            return EXIT_FAILURE;
+        }
         if (read_password(password, &password_len) != 1) {
             fprintf(stderr, "비어 있지 않은 서버 개인키 암호가 필요합니다.\n");
             return EXIT_FAILURE;
         }
-        if (util_log_init("server.log", LOG_DEBUG) != 1) {
-            fprintf(stderr, "server.log를 열지 못했습니다.\n");
+        if (util_log_init(SERVER_DIR "/server.log", LOG_DEBUG) != 1) {
+            fprintf(stderr, "서버 로그 파일을 열지 못했습니다.\n");
             OPENSSL_cleanse(password, sizeof password);
             return EXIT_FAILURE;
         }
@@ -123,11 +129,15 @@ int main(int argc, char** argv) {
 
         unsigned char password[PASSWORD_MAX_BYTE];
         size_t password_len = 0;
+        if (util_ensure_dir(CLIENT_DIR) != 1) {
+            fprintf(stderr, "%s 디렉터리를 만들지 못했습니다.\n", CLIENT_DIR);
+            return EXIT_FAILURE;
+        }
         if (read_password(password, &password_len) != 1) {
             fprintf(stderr, "비어 있지 않은 개인키 암호가 필요합니다.\n");
             return EXIT_FAILURE;
         }
-        const char* key_path = argc == 5 ? argv[4] : "client-key.enc";
+        const char* key_path = argc == 5 ? argv[4] : CLIENT_DIR "/client-key.enc";
         int success = client_run(argv[2], port, key_path, password, password_len);
         OPENSSL_cleanse(password, sizeof password);
         return success ? EXIT_SUCCESS : EXIT_FAILURE;

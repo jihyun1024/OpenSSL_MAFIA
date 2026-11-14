@@ -6,6 +6,8 @@
 #include <pthread.h>
 #include <time.h>
 #include <string.h>
+#include <errno.h>
+#include <sys/stat.h>
 
 
 // ===== 로그 모듈 내부 상태 =====
@@ -133,4 +135,17 @@ int util_log_close(void) {
 
     pthread_mutex_unlock(&g_log_lock);
     return result;
+}
+
+
+// 디렉터리가 없으면 mode 0700으로 만든다. 이미 디렉터리가 있으면 성공 처리.
+int util_ensure_dir(const char* path) {
+    if (path == NULL || path[0] == '\0') return 0;
+
+    if (mkdir(path, 0700) == 0) return 1;
+    if (errno != EEXIST) return 0;
+
+    struct stat st;
+    if (stat(path, &st) != 0) return 0;
+    return S_ISDIR(st.st_mode) ? 1 : 0;
 }

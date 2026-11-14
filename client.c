@@ -30,7 +30,7 @@ typedef struct {
     int my_slot;
     int my_turn;
     int vote_phase;
-    int voted;
+    int vote_pending;   // 투표를 보내고 서버 응답을 기다리는 중
     int commit_received;
     unsigned char commit[SHA256_BYTE];
 } client_ctx;
@@ -340,8 +340,18 @@ static void* receive_thread(void* argument) {
             break;
 
         case MSG_PKT_ERROR:
-            if (plaintext_len != 0) client_stop(client);
-            else printf("[!] 서버가 요청을 거부했습니다.\n");
+            if (plaintext_len != 0) {
+                client_stop(client);
+                break;
+            }
+            pthread_mutex_lock(&client->lock);
+            int was_pending = client->vote_pending;
+            client->vote_pending = 0;   // 거부되었으니 다시 투표할 수 있다
+            pthread_mutex_unlock(&client->lock);
+            if (was_pending)
+                printf("[!] 없는 사람을 지목했습니다. 유효한 슬롯으로 다시 투표하세요.\n");
+            else
+                printf("[!] 서버가 요청을 거부했습니다.\n");
             break;
 
         default:
@@ -376,7 +386,7 @@ static void* input_thread(void* argument) {
 
         pthread_mutex_lock(&client->lock);
         int my_turn = client->my_turn;
-        int can_vote = client->vote_phase && !client->voted;
+        int can_vote = client->vote_phase && !client->vote_pending;
         pthread_mutex_unlock(&client->lock);
 
         if (strncmp(line, "vote ", 5) == 0) {
@@ -390,13 +400,15 @@ static void* input_thread(void* argument) {
 
             unsigned char vote[VOTE_PLAINTEXT_BYTE];
             size_t vote_len = sizeof vote;
+            // 보내기 전에 대기 상태로 표시해 두 번 보내지 않는다. 서버가 없는
+            // 사람 지목을 거부하면(MSG_PKT_ERROR) 다시 투표할 수 있게 된다.
+            pthread_mutex_lock(&client->lock);
+            client->vote_pending = 1;
+            pthread_mutex_unlock(&client->lock);
             if (vote_build(client->self_key, (unsigned char)target,
                            client->self_id, vote, &vote_len) != 1 ||
                 send_packet(client, MSG_VOTE, vote, vote_len) != 1)
                 break;
-            pthread_mutex_lock(&client->lock);
-            client->voted = 1;
-            pthread_mutex_unlock(&client->lock);
             printf("[투표] 슬롯 %ld 지목 전송\n", target);
         } else {
             if (!my_turn || len >= PKT_MAX_PLAINTEXT) {
@@ -413,18 +425,32 @@ static void* input_thread(void* argument) {
     return NULL;
 }
 
-static void build_client_log_path(const unsigned char id[CLIENT_ID_BYTE],
-                                  char* out, size_t out_len) {
+// 로그는 키 파일과 같은 디렉터리에 client-<공개키 ID>.log 로 만든다.
+// 성공 시 1, 버퍼 부족 등 실패 시 0.
+static int build_client_log_path(const char* key_path,
+                                 const unsigned char id[CLIENT_ID_BYTE],
+                                 char* out, size_t out_len) {
+    // key_path에서 디렉터리 부분(마지막 '/'까지)을 떼어낸다.
+    const char* slash = strrchr(key_path, '/');
+    size_t dir_len = slash != NULL ? (size_t)(slash - key_path) + 1 : 0;
+
+    size_t need = dir_len + 7 /*"client-"*/ + CLIENT_ID_BYTE * 2 + 4 /*".log"*/ + 1;
+    if (need > out_len) return 0;
+
     size_t offset = 0;
-    int written = snprintf(out, out_len, "client-");
-    if (written < 0) return;
-    offset = (size_t)written;
-    for (size_t i = 0; i < CLIENT_ID_BYTE && offset + 2 < out_len; i++) {
-        written = snprintf(out + offset, out_len - offset, "%02x", id[i]);
-        if (written != 2) return;
-        offset += 2;
+    if (dir_len > 0) {
+        memcpy(out, key_path, dir_len);
+        offset = dir_len;
     }
-    if (offset + 4 < out_len) memcpy(out + offset, ".log", 5);
+    memcpy(out + offset, "client-", 7);
+    offset += 7;
+    for (size_t i = 0; i < CLIENT_ID_BYTE; i++) {
+        static const char hex[] = "0123456789abcdef";
+        out[offset++] = hex[id[i] >> 4];
+        out[offset++] = hex[id[i] & 0x0F];
+    }
+    memcpy(out + offset, ".log", 5);
+    return 1;
 }
 
 int client_run(const char* host, int port, const char* key_path,
@@ -452,10 +478,11 @@ int client_run(const char* host, int port, const char* key_path,
         goto done;
     }
 
-    char log_path[64];
-    memset(log_path, 0, sizeof log_path);
-    build_client_log_path(client.self_id, log_path, sizeof log_path);
-    if (util_log_init(log_path, LOG_DEBUG) != 1) goto done;
+    char log_path[256];
+    if (build_client_log_path(key_path, client.self_id,
+                              log_path, sizeof log_path) != 1 ||
+        util_log_init(log_path, LOG_DEBUG) != 1)
+        goto done;
 
     client.fd = socket(AF_INET, SOCK_STREAM, 0);
     if (client.fd < 0) goto done;

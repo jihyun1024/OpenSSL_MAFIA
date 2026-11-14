@@ -29,5 +29,9 @@ int util_log_write(log_level level, const char* fmt_msg, ...);
 // 로그 시스템 해제 (열어 둔 파일을 닫고 내부 상태 정리, 받는 인자 없음)
 int util_log_close(void);
 
+// 디렉터리가 없으면 mode 0700으로 만든다. 이미 있으면 성공으로 본다.
+// 성공 시 1, 실패 시 0 반환.
+int util_ensure_dir(const char* path);
+
 
 #endif
