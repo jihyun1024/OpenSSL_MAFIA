@@ -2,6 +2,8 @@
 
 #include <string.h>   
 #include <stddef.h>   
+#include <unistd.h>
+#include <errno.h>
 
 
 // =====================================================================
@@ -466,4 +468,225 @@ done:
         util_log_write(LOG_ERROR, "server_auth_ok: AUTH_OK 암호화 실패, 핸드셰이크 상태: HS_FAILED");
     }
     return success;
+}
+
+
+// ===== 게임 프로토콜 패킷 프레이밍 =====
+
+// 8바이트 big-endian 쓰기/읽기
+static void put_u64_be(unsigned char* p, unsigned long long v) {
+    for (int i = 7; i >= 0; i--) { p[i] = (unsigned char)(v & 0xFF); v >>= 8; }
+}
+static unsigned long long get_u64_be(const unsigned char* p) {
+    unsigned long long v = 0;
+    for (int i = 0; i < 8; i++) v = (v << 8) | p[i];
+    return v;
+}
+static void put_u32_be(unsigned char* p, unsigned int v) {
+    p[0] = (unsigned char)(v >> 24); p[1] = (unsigned char)(v >> 16);
+    p[2] = (unsigned char)(v >> 8);  p[3] = (unsigned char)(v & 0xFF);
+}
+static unsigned int get_u32_be(const unsigned char* p) {
+    return ((unsigned int)p[0] << 24) | ((unsigned int)p[1] << 16) |
+           ((unsigned int)p[2] << 8)  | (unsigned int)p[3];
+}
+
+// AAD = type(1B) || seq(8B) || sender_id(CLIENT_ID_BYTE)
+static void build_aad(unsigned char* aad, unsigned char type,
+                      unsigned long long seq, const unsigned char* sender_id) {
+    aad[0] = type;
+    put_u64_be(aad + PKT_TYPE_BYTE, seq);
+    memcpy(aad + PKT_TYPE_BYTE + PKT_SEQ_BYTE, sender_id, CLIENT_ID_BYTE);
+}
+
+int sec_channel_init(sec_channel* ch, int is_server,
+                     const unsigned char k_c2s[AEAD_KEY_BYTE],
+                     const unsigned char k_s2c[AEAD_KEY_BYTE],
+                     const unsigned char self_id[CLIENT_ID_BYTE],
+                     const unsigned char peer_id[CLIENT_ID_BYTE]) {
+    if (ch == NULL || k_c2s == NULL || k_s2c == NULL ||
+        self_id == NULL || peer_id == NULL) return 0;
+
+    // 서버는 s2c로 보내고 c2s로 받는다. 클라는 그 반대.
+    if (is_server) {
+        memcpy(ch->k_tx, k_s2c, AEAD_KEY_BYTE);
+        memcpy(ch->k_rx, k_c2s, AEAD_KEY_BYTE);
+    } else {
+        memcpy(ch->k_tx, k_c2s, AEAD_KEY_BYTE);
+        memcpy(ch->k_rx, k_s2c, AEAD_KEY_BYTE);
+    }
+    memcpy(ch->self_id, self_id, CLIENT_ID_BYTE);
+    memcpy(ch->peer_id, peer_id, CLIENT_ID_BYTE);
+    ch->tx_seq = 0;
+    ch->rx_seq = 0;
+    return 1;
+}
+
+void sec_channel_free(sec_channel* ch) {
+    if (ch == NULL) return;
+    OPENSSL_cleanse(ch->k_tx, sizeof ch->k_tx);
+    OPENSSL_cleanse(ch->k_rx, sizeof ch->k_rx);
+    ch->tx_seq = 0;
+    ch->rx_seq = 0;
+}
+
+int packet_seal(sec_channel* ch, unsigned char type,
+                const unsigned char* plaintext, size_t plaintext_len,
+                unsigned char* out, size_t* out_len) {
+    if (ch == NULL || out == NULL || out_len == NULL) return 0;
+    if (plaintext_len > PKT_MAX_PLAINTEXT) return 0;
+    if (plaintext_len > 0 && plaintext == NULL) return 0;
+
+    size_t need = PKT_LEN_BYTE + PKT_MIN_BODY_BYTE + plaintext_len;
+    if (*out_len < need) return 0;
+
+    unsigned long long seq = ch->tx_seq + 1;
+
+    unsigned char nonce[AEAD_NONCE_BYTE];
+    if (rand_bytes(nonce, AEAD_NONCE_BYTE) != 1) return 0;
+
+    unsigned char aad[PKT_AAD_BYTE];
+    build_aad(aad, type, seq, ch->self_id);
+
+    // 레이아웃: len(4) | type(1) | seq(8) | nonce(12) | ct | tag(16)
+    unsigned char* p_type  = out + PKT_LEN_BYTE;
+    unsigned char* p_seq   = p_type + PKT_TYPE_BYTE;
+    unsigned char* p_nonce = p_seq + PKT_SEQ_BYTE;
+    unsigned char* p_ct    = p_nonce + AEAD_NONCE_BYTE;
+    unsigned char* p_tag   = p_ct + plaintext_len;
+
+    *p_type = type;
+    put_u64_be(p_seq, seq);
+    memcpy(p_nonce, nonce, AEAD_NONCE_BYTE);
+
+    size_t ct_len = 0;
+    if (aead_encrypt(ch->k_tx, nonce, aad, sizeof aad,
+                     plaintext, plaintext_len, p_ct, &ct_len, p_tag) != 1)
+        return 0;
+    if (ct_len != plaintext_len) return 0;
+
+    unsigned int body = (unsigned int)(PKT_MIN_BODY_BYTE + plaintext_len);
+    put_u32_be(out, body);
+
+    *out_len = PKT_LEN_BYTE + body;
+    ch->tx_seq = seq;   // 성공 후에만 증가
+
+    util_log_write(LOG_DEBUG, "packet_seal: type=0x%02X seq=%llu len=%zu",
+                   type, seq, *out_len);
+    return 1;
+}
+
+int packet_open(sec_channel* ch,
+                const unsigned char* in, size_t in_len,
+                unsigned char* out_type,
+                unsigned char* plaintext, size_t* plaintext_len) {
+    if (ch == NULL || in == NULL || plaintext_len == NULL) return 0;
+    if (in_len < PKT_LEN_BYTE + PKT_MIN_BODY_BYTE) return 0;
+
+    unsigned int body = get_u32_be(in);
+    if ((size_t)body + PKT_LEN_BYTE != in_len) return 0;          // 길이 불일치
+    if (body < PKT_MIN_BODY_BYTE) return 0;
+
+    size_t ct_len = body - PKT_MIN_BODY_BYTE;
+    if (ct_len > PKT_MAX_PLAINTEXT) return 0;
+    if (*plaintext_len < ct_len) return 0;
+
+    const unsigned char* p_type  = in + PKT_LEN_BYTE;
+    const unsigned char* p_seq   = p_type + PKT_TYPE_BYTE;
+    const unsigned char* p_nonce = p_seq + PKT_SEQ_BYTE;
+    const unsigned char* p_ct    = p_nonce + AEAD_NONCE_BYTE;
+    const unsigned char* p_tag   = p_ct + ct_len;
+
+    unsigned char type = *p_type;
+    unsigned long long seq = get_u64_be(p_seq);
+
+    // 재전송 방어: seq가 직전 수용 값 이하이면 폐기
+    if (seq <= ch->rx_seq) {
+        util_log_write(LOG_WARN, "packet_open: 재전송 의심 seq=%llu (last=%llu), 폐기",
+                       seq, ch->rx_seq);
+        return 0;
+    }
+
+    // AAD는 상대 sender_id로 재구성 (헤더 변조 시 태그 검증 실패)
+    unsigned char aad[PKT_AAD_BYTE];
+    build_aad(aad, type, seq, ch->peer_id);
+
+    size_t pt_len = *plaintext_len;
+    if (aead_decrypt(ch->k_rx, p_nonce, aad, sizeof aad,
+                     p_ct, ct_len, plaintext, &pt_len, p_tag) != 1) {
+        util_log_write(LOG_WARN, "packet_open: 태그 검증/복호화 실패 (type=0x%02X seq=%llu)",
+                       type, seq);
+        return 0;
+    }
+
+    ch->rx_seq = seq;   // 검증 성공 후에만 갱신
+    if (out_type != NULL) *out_type = type;
+    *plaintext_len = pt_len;
+
+    util_log_write(LOG_DEBUG, "packet_open: type=0x%02X seq=%llu plaintext=%zu",
+                   type, seq, pt_len);
+    return 1;
+}
+
+
+// ===== 소켓 I/O 헬퍼 =====
+
+int io_write_all(int fd, const unsigned char* buf, size_t len) {
+    size_t off = 0;
+    while (off < len) {
+        ssize_t n = write(fd, buf + off, len - off);
+        if (n < 0) { if (errno == EINTR) continue; return 0; }
+        if (n == 0) return 0;
+        off += (size_t)n;
+    }
+    return 1;
+}
+
+int io_read_all(int fd, unsigned char* buf, size_t len) {
+    size_t off = 0;
+    while (off < len) {
+        ssize_t n = read(fd, buf + off, len - off);
+        if (n < 0) { if (errno == EINTR) continue; return 0; }
+        if (n == 0) return 0;   // 상대가 연결 종료
+        off += (size_t)n;
+    }
+    return 1;
+}
+
+int io_write_blob(int fd, const unsigned char* data, size_t len) {
+    if (data == NULL && len > 0) return 0;
+    unsigned char hdr[4];
+    put_u32_be(hdr, (unsigned int)len);
+    if (io_write_all(fd, hdr, 4) != 1) return 0;
+    if (len > 0 && io_write_all(fd, data, len) != 1) return 0;
+    return 1;
+}
+
+int io_read_blob(int fd, unsigned char* buf, size_t* len) {
+    if (buf == NULL || len == NULL) return 0;
+    unsigned char hdr[4];
+    if (io_read_all(fd, hdr, 4) != 1) return 0;
+    unsigned int n = get_u32_be(hdr);
+    if (n > *len) return 0;             // 버퍼 용량 초과
+    if (n > 0 && io_read_all(fd, buf, n) != 1) return 0;
+    *len = n;
+    return 1;
+}
+
+int io_write_packet(int fd, const unsigned char* pkt, size_t pkt_len) {
+    if (pkt == NULL || pkt_len < PKT_LEN_BYTE) return 0;
+    return io_write_all(fd, pkt, pkt_len);   // 패킷 선두에 이미 len 필드 포함
+}
+
+int io_read_packet(int fd, unsigned char* buf, size_t* len) {
+    if (buf == NULL || len == NULL) return 0;
+    if (*len < PKT_LEN_BYTE) return 0;
+    // 선두 4B len 필드 읽기
+    if (io_read_all(fd, buf, PKT_LEN_BYTE) != 1) return 0;
+    unsigned int body = get_u32_be(buf);
+    size_t total = (size_t)PKT_LEN_BYTE + body;
+    if (total > *len || body == 0) return 0;
+    if (io_read_all(fd, buf + PKT_LEN_BYTE, body) != 1) return 0;
+    *len = total;
+    return 1;
 }

@@ -27,12 +27,44 @@
 
 // 메시지 타입
 typedef enum {
-    MSG_HELLO     = 1,
-    MSG_CHALLENGE = 2,
-    MSG_AUTH      = 3,
-    MSG_AUTH_OK   = 4,
+    MSG_HELLO     = 0x01,
+    MSG_CHALLENGE = 0x02,
+    MSG_AUTH      = 0x03,
+    MSG_AUTH_OK   = 0x04,
+    MSG_READY     = 0x10,
+    MSG_LOBBY     = 0x11,
+    MSG_ASSIGN    = 0x20,
+    MSG_COMMIT    = 0x21,
+    MSG_TURN      = 0x22,
+    MSG_HINT      = 0x23,
+    MSG_VOTE      = 0x24,
+    MSG_END       = 0x25,
+    MSG_PKT_ERROR = 0x7F,   // 게임 프로토콜 패킷 오류 응답 코드
     MSG_ERROR     = 0xFF
 } msg_type;
+
+// 게임 프로토콜 패킷 구조 (핸드셰이크 이후 AES-GCM 보호 채널)
+//   와이어: len(4B) + type(1B) + seq(8B) + nonce(12B) + ciphertext + tag(16B)
+//   len 필드는 자신을 제외한 나머지 전체 길이
+//   AAD = type(1B) || seq(8B) || sender_id(CLIENT_ID_BYTE)
+#define PKT_LEN_BYTE        4
+#define PKT_TYPE_BYTE       1
+#define PKT_SEQ_BYTE        8
+#define PKT_HEADER_BYTE     (PKT_TYPE_BYTE + PKT_SEQ_BYTE + AEAD_NONCE_BYTE)
+#define PKT_AAD_BYTE        (PKT_TYPE_BYTE + PKT_SEQ_BYTE + CLIENT_ID_BYTE)
+// len 필드가 덮는 최소 길이 (평문 0바이트일 때): type+seq+nonce+tag
+#define PKT_MIN_BODY_BYTE   (PKT_TYPE_BYTE + PKT_SEQ_BYTE + AEAD_NONCE_BYTE + AEAD_TAG_BYTE)
+#define PKT_MAX_PLAINTEXT   4096
+
+// 암호 채널 세션 문맥: 핸드셰이크로 성립된 세션키와 방향별 seq 카운터를 보관
+typedef struct {
+    unsigned char k_tx[AEAD_KEY_BYTE];        // 송신 방향 키
+    unsigned char k_rx[AEAD_KEY_BYTE];        // 수신 방향 키
+    unsigned char self_id[CLIENT_ID_BYTE];    // 자신의 sender_id (AAD용)
+    unsigned char peer_id[CLIENT_ID_BYTE];    // 상대 sender_id (수신 AAD용)
+    unsigned long long tx_seq;                // 다음 송신 seq (1부터 증가)
+    unsigned long long rx_seq;                // 마지막으로 수용한 수신 seq
+} sec_channel;
 
 
 // 메시지 구조체 4가지
@@ -119,5 +151,51 @@ int server_challenge(handshake_ctx* ctx, msg_challenge* out);
 int server_recv_auth(handshake_ctx* ctx, const msg_auth* in,
                      unsigned char k_c2s[AEAD_KEY_BYTE], unsigned char k_s2c[AEAD_KEY_BYTE]);
 int server_auth_ok(handshake_ctx* ctx, msg_auth_ok* out);
+
+
+// ===== 게임 프로토콜 패킷 프레이밍 (암호 채널) =====
+
+// 세션 문맥 초기화: 방향별 키와 양쪽 sender_id를 저장하고 seq를 0으로 둔다.
+// is_server가 참이면 송신=k_s2c/수신=k_c2s, 거짓이면 그 반대로 매핑한다.
+int sec_channel_init(sec_channel* ch, int is_server,
+                     const unsigned char k_c2s[AEAD_KEY_BYTE],
+                     const unsigned char k_s2c[AEAD_KEY_BYTE],
+                     const unsigned char self_id[CLIENT_ID_BYTE],
+                     const unsigned char peer_id[CLIENT_ID_BYTE]);
+// 세션 문맥 소거.
+void sec_channel_free(sec_channel* ch);
+
+// 평문 메시지 한 건을 패킷으로 직렬화(암호화)한다.
+//   ch->tx_seq를 하나 올려 seq로 쓰고, 랜덤 nonce를 생성해 암호화.
+//   out_len: 호출 시 버퍼 용량, 반환 시 실제 패킷 길이.
+//   성공 1 / 실패 0.
+int packet_seal(sec_channel* ch, unsigned char type,
+                const unsigned char* plaintext, size_t plaintext_len,
+                unsigned char* out, size_t* out_len);
+
+// 수신 패킷을 검증(태그/seq)하고 복호화한다.
+//   seq가 ch->rx_seq 이하이면 재전송으로 보고 폐기(0 반환).
+//   성공 시 ch->rx_seq를 갱신하고 평문/타입을 출력.
+//   plaintext_len: 호출 시 버퍼 용량, 반환 시 실제 평문 길이.
+//   성공 1 / 실패 0.
+int packet_open(sec_channel* ch,
+                const unsigned char* in, size_t in_len,
+                unsigned char* out_type,
+                unsigned char* plaintext, size_t* plaintext_len);
+
+
+// ===== 소켓 I/O 헬퍼 (TCP) =====
+
+// 정확히 len 바이트를 쓰거나 읽는다 (부분 전송 처리). 성공 1 / 실패 0.
+int io_write_all(int fd, const unsigned char* buf, size_t len);
+int io_read_all(int fd, unsigned char* buf, size_t len);
+
+// 길이(4B big-endian) 프리픽스 blob 송수신 (공개키 등 가변 데이터용).
+int io_write_blob(int fd, const unsigned char* data, size_t len);
+int io_read_blob(int fd, unsigned char* buf, size_t* len);
+
+// 완성 패킷 한 건 송수신 (앞 4B len 필드로 경계 파악).
+int io_write_packet(int fd, const unsigned char* pkt, size_t pkt_len);
+int io_read_packet(int fd, unsigned char* buf, size_t* len);
 
 #endif
